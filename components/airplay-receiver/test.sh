@@ -14,6 +14,11 @@ assert_grep -- '--with-ssl=openssl' Containerfile
 assert_grep -- '--with-stdout' Containerfile
 assert_grep -- '--with-pipe' Containerfile
 assert_grep -- '--with-ffmpeg' Containerfile
+assert_grep 'patch --batch --fuzz=0 -p1' Containerfile
+[ "$(grep -Ec '^\+ +((int lerr|err) = )bind_socket_and_port_range\(' shairport-sync-5.2.1-bounded-ap2-ports.patch)" -eq 6 ] || fail 'all six AP2 dynamic listener call sites must be bounded'
+assert_grep '^\+int bind_socket_and_port_range' shairport-sync-5.2.1-bounded-ap2-ports.patch
+assert_grep '^  udp_port_base = 6001;' shairport-sync.conf.in
+assert_grep '^  udp_port_range = 10;' shairport-sync.conf.in
 for expected in 'service_type = "airplay2"' 'output_backend = "@@OUTPUT_BACKEND@@"' 'output_rate = 48000' 'output_format = "S32_LE"' 'output_channels = 2' 'ignore_volume_control = "yes"' 'include_cover_art = "no"' 'pipe_name = "/run/airplay/metadata"' 'interface = "@@AIRPLAY_INTERFACE@@"'; do assert_grep "$expected" shairport-sync.conf.in; done
 assert_grep '^pipe = \{' shairport-sync.conf.in
 assert_grep 'name = "/run/airplay/audio"' shairport-sync.conf.in
@@ -39,6 +44,10 @@ assert_grep 'read_only: true' compose.integration-test-only.yaml
 assert_grep 'iifname "@@INTERFACE@@" ip saddr @@IPV4_CIDR@@ tcp dport 7000 accept' household-audio-airplay.nft.in
 assert_grep 'ip6 saddr @@IPV6_CIDR@@ tcp dport 7000 accept' household-audio-airplay.nft.in
 assert_grep 'tcp dport 7000 reject' household-audio-airplay.nft.in
+assert_grep 'tcp dport 6001-6010 reject' household-audio-airplay.nft.in
+assert_grep 'ip saddr @@IPV4_CIDR@@ tcp dport 6001-6010 accept' household-audio-airplay.nft.in
+assert_grep 'ip6 saddr @@IPV6_CIDR@@ udp dport 6001-6010 accept' household-audio-airplay.nft.in
+assert_grep 'udp dport 6001-6010 reject' household-audio-airplay.nft.in
 assert_grep 'udp dport \{ 319, 320 \} reject' household-audio-airplay.nft.in
 assert_grep 'NQPTP is GPL-2.0-only' LICENSES.md
 assert_grep 'org.opencontainers.image.source="https://github.com/jefffm/household-audio-fabric"' Containerfile

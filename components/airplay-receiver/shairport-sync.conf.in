@@ -8,6 +8,9 @@ general = {
   mdns_backend = "avahi";
   playback_mode = "stereo";
   ignore_volume_control = "yes";
+  // Patched AirPlay 2 event, control, and data listeners are confined here.
+  udp_port_base = 6001;
+  udp_port_range = 10;
 };
 
 stdout = {

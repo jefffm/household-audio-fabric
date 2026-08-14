@@ -15,7 +15,7 @@ RUN printf '%s\n' \
  && rm -f /etc/apt/sources.list.d/debian.sources \
  && apt-get -o Acquire::Check-Valid-Until=false update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-      autoconf automake build-essential ca-certificates curl libtool pkg-config xxd \
+      autoconf automake build-essential ca-certificates curl libtool patch pkg-config xxd \
       libavahi-client-dev libconfig-dev libgcrypt20-dev \
       libplist-dev libplist-utils libpopt-dev libsodium-dev libsoxr-dev libssl-dev \
       libavcodec-dev libavformat-dev libavutil-dev libswresample-dev uuid-dev \
@@ -30,16 +30,26 @@ RUN curl -fsSL "https://github.com/mikebrady/nqptp/archive/refs/tags/${NQPTP_VER
  && install -D -m0644 COPYING /out/usr/share/doc/nqptp/COPYING \
  && install -m0644 LICENSE /out/usr/share/doc/nqptp/LICENSE
 
+COPY shairport-sync-5.2.1-bounded-ap2-ports.patch bounded-port-test.c /build/
 RUN curl -fsSL "https://github.com/mikebrady/shairport-sync/archive/refs/tags/${SHAIRPORT_SYNC_VERSION}.tar.gz" -o shairport-sync.tar.gz \
  && echo "${SHAIRPORT_SYNC_SHA256}  shairport-sync.tar.gz" | sha256sum -c - \
  && mkdir shairport-sync && tar -xzf shairport-sync.tar.gz --strip-components=1 -C shairport-sync \
- && cd shairport-sync && autoreconf -fi \
+ && cd shairport-sync && patch --batch --fuzz=0 -p1 < ../shairport-sync-5.2.1-bounded-ap2-ports.patch \
+ && autoreconf -fi \
  && ./configure --prefix=/usr/local --sysconfdir=/etc \
       --with-airplay-2 --with-avahi --with-ffmpeg --with-ssl=openssl \
       --with-pipe --with-stdout --with-soxr --with-metadata --with-metadata-pipe \
       --without-alsa --without-pulseaudio --without-systemd-startup \
       --without-create-user-group --without-configfiles \
- && make -j"$(nproc)" && make install DESTDIR=/out \
+ && make -j"$(nproc)" \
+ && gcc -DHAVE_CONFIG_H -I. --include=utilities/debug.h -DSYSCONFDIR=\"/etc\" \
+      -Wall -Wextra -Werror -ffunction-sections -fdata-sections -pthread -c common.c -o /tmp/common-bounded-port-test.o \
+ && gcc -DHAVE_CONFIG_H -I. -Wall -Wextra -Werror -ffunction-sections -fdata-sections -pthread \
+      -c /build/bounded-port-test.c -o /tmp/bounded-port-test.o \
+ && gcc -Wl,--gc-sections -pthread /tmp/bounded-port-test.o /tmp/common-bounded-port-test.o \
+      -o /tmp/bounded-port-test \
+ && /tmp/bounded-port-test \
+ && make install DESTDIR=/out \
  && install -D -m0644 COPYING /out/usr/share/doc/shairport-sync/COPYING \
  && cp -a LICENSES /out/usr/share/doc/shairport-sync/LICENSES
 
@@ -72,7 +82,7 @@ RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh /usr/l
  && chmod 0644 /etc/shairport-sync.conf.in \
  && /usr/local/bin/generate-package-inventory.sh
 USER 10001:10001
-EXPOSE 7000/tcp 319/udp 320/udp 5353/udp
+EXPOSE 7000/tcp 6001-6010/tcp 6001-6010/udp 319/udp 320/udp 5353/udp
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["shairport"]
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/healthcheck.sh"]

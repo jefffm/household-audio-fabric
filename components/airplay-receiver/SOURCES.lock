@@ -1,5 +1,6 @@
 # Immutable upstream inputs (SHA-256 of GitHub release archives)
 shairport-sync 5.2.1 https://github.com/mikebrady/shairport-sync/archive/refs/tags/5.2.1.tar.gz sha256:8f97d1a6e045bc3765b10d0cd64abe467eba343af89fa1e158f7fa28b73c4ab6
+downstream-shairport-bounded-ap2-ports shairport-sync-5.2.1-bounded-ap2-ports.patch sha256:e4d26d54cdf4463885be200eff51b40f21133cb1ae49766a00b6a51a3336e631
 nqptp 1.2.8 https://github.com/mikebrady/nqptp/archive/refs/tags/1.2.8.tar.gz sha256:3a2882a299c21605f53bb215ce537f9cc7a1e894476f639ab28562c68fd183a9
 debian bookworm-slim docker.io/library/debian@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 debian-snapshot 20260803T000000Z https://snapshot.debian.org/

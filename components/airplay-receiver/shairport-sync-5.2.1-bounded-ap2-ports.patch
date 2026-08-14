@@ -1,0 +1,348 @@
+diff --git i/common.c w/common.c
+index f041c22..c65acca 100644
+--- i/common.c
++++ w/common.c
+@@ -383,7 +383,10 @@ int bind_socket_and_port(int type, int ip_family, const char *self_ip_address, u
+       struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&myaddr;
+       sa6->sin6_family = AF_INET6;
+       sa6->sin6_port = ntohs(*port);
+-      inet_pton(AF_INET6, self_ip_address, &(sa6->sin6_addr));
++      if (inet_pton(AF_INET6, self_ip_address, &(sa6->sin6_addr)) != 1) {
++        safe_socket_close(&local_socket);
++        return EINVAL;
++      }
+       sa6->sin6_scope_id = scope_id;
+       ret = bind(local_socket, (struct sockaddr *)sa6, sizeof(struct sockaddr_in6));
+     }
+@@ -424,7 +427,67 @@ int bind_socket_and_port(int type, int ip_family, const char *self_ip_address, u
+   return ret;
+ }
+ 
+-uint16_t bind_UDP_port(int ip_family, const char *self_ip_address, uint32_t scope_id, int *sock) {
++int bind_socket_and_port_range(int type, int ip_family,
++                               const char *self_ip_address, uint32_t scope_id,
++                               uint32_t first_port, uint32_t port_count,
++                               uint16_t *port, int *sock) {
++  if ((port == NULL) || (sock == NULL))
++    return EINVAL;
++  *port = 0;
++  *sock = -1;
++  if ((first_port == 0) || (first_port > UINT16_MAX) || (port_count == 0) ||
++      (port_count > UINT16_MAX) || (port_count - 1 > UINT16_MAX - first_port))
++    return EINVAL;
++
++  for (uint32_t offset = 0; offset < port_count; offset++) {
++    uint16_t candidate = (uint16_t)(first_port + offset);
++    int local_socket = socket(ip_family, type, 0);
++    if (local_socket == -1)
++      return errno;
++
++    SOCKADDR myaddr;
++    memset(&myaddr, 0, sizeof(myaddr));
++    int ret = EAFNOSUPPORT;
++    if (ip_family == AF_INET) {
++      struct sockaddr_in *sa = (struct sockaddr_in *)&myaddr;
++      sa->sin_family = AF_INET;
++      sa->sin_port = htons(candidate);
++      if (inet_pton(AF_INET, self_ip_address, &(sa->sin_addr)) != 1) {
++        safe_socket_close(&local_socket);
++        return EINVAL;
++      }
++      ret =
++          bind(local_socket, (struct sockaddr *)sa, sizeof(struct sockaddr_in));
++    }
++#ifdef AF_INET6
++    if (ip_family == AF_INET6) {
++      struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&myaddr;
++      sa6->sin6_family = AF_INET6;
++      sa6->sin6_port = htons(candidate);
++      if (inet_pton(AF_INET6, self_ip_address, &(sa6->sin6_addr)) != 1) {
++        safe_socket_close(&local_socket);
++        return EINVAL;
++      }
++      sa6->sin6_scope_id = scope_id;
++      ret = bind(local_socket, (struct sockaddr *)sa6,
++                 sizeof(struct sockaddr_in6));
++    }
++#endif
++    if (ret == 0) {
++      *port = candidate;
++      *sock = local_socket;
++      return 0;
++    }
++    int bind_error = (ret < 0) ? errno : ret;
++    safe_socket_close(&local_socket);
++    if (bind_error != EADDRINUSE)
++      return bind_error;
++  }
++  return EADDRINUSE;
++}
++
++uint16_t bind_UDP_port(int ip_family, const char *self_ip_address,
++                       uint32_t scope_id, int *sock) {
+   // look for a port in the range, if any was specified.
+   int ret = 0;
+ 
+@@ -461,7 +524,10 @@ uint16_t bind_UDP_port(int ip_family, const char *self_ip_address, uint32_t scop
+       struct sockaddr_in6 *sa6 = (struct sockaddr_in6 *)&myaddr;
+       sa6->sin6_family = AF_INET6;
+       sa6->sin6_port = ntohs(desired_port);
+-      inet_pton(AF_INET6, self_ip_address, &(sa6->sin6_addr));
++      if (inet_pton(AF_INET6, self_ip_address, &(sa6->sin6_addr)) != 1) {
++        safe_socket_close(&local_socket);
++        return EINVAL;
++      }
+       sa6->sin6_scope_id = scope_id;
+       ret = bind(local_socket, (struct sockaddr *)sa6, sizeof(struct sockaddr_in6));
+     }
+diff --git i/common.h w/common.h
+index 772da08..e69c173 100644
+--- i/common.h
++++ w/common.h
+@@ -603,7 +603,13 @@ void *memdup(const void *mem, size_t size);
+ int bind_socket_and_port(int type, int ip_family, const char *self_ip_address, uint32_t scope_id,
+                          uint16_t *port, int *sock);
+ 
+-uint16_t bind_UDP_port(int ip_family, const char *self_ip_address, uint32_t scope_id, int *sock);
++int bind_socket_and_port_range(int type, int ip_family,
++                               const char *self_ip_address, uint32_t scope_id,
++                               uint32_t first_port, uint32_t port_count,
++                               uint16_t *port, int *sock);
++
++uint16_t bind_UDP_port(int ip_family, const char *self_ip_address,
++                       uint32_t scope_id, int *sock);
+ 
+ // for pthread_push and pop
+ // careful with the difference between cleanup and unlock!
+diff --git i/rtsp.c w/rtsp.c
+index 60a9929..f93ac8e 100644
+--- i/rtsp.c
++++ w/rtsp.c
+@@ -2624,17 +2624,32 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
+               // get a port to use as an event port
+               // bind a new TCP port and get a socket
+               conn->local_event_port = 0; // any port
+-              int lerr = bind_socket_and_port(SOCK_STREAM, conn->connection_ip_family,
+-                                              conn->self_ip_string, conn->self_scope_id,
+-                                              &conn->local_event_port, &conn->event_socket);
++              int lerr = bind_socket_and_port_range(
++                  SOCK_STREAM, conn->connection_ip_family, conn->self_ip_string,
++                  conn->self_scope_id, config.udp_port_base,
++                  config.udp_port_range, &conn->local_event_port,
++                  &conn->event_socket);
+               if (lerr) {
+-                die("SETUP on Connection %d: Error %d: could not find a TCP port to use as an "
+-                    "event "
+-                    "port",
+-                    conn->connection_number, lerr);
++                warn("SETUP on Connection %d: Error %d: could not find a TCP "
++                     "port to use as an "
++                     "event "
++                     "port",
++                     conn->connection_number, lerr);
++                resp->respcode = 503;
++                conn->stop = 1;
++                plist_free(setupResponsePlist);
++                plist_free(messagePlist);
++                return;
+               }
+ 
+-              listen(conn->event_socket, 128); // ensure socket is open before telling client
++              if (listen(conn->event_socket, 128) != 0) {
++                warn("Connection %d: could not listen on the bounded TCP event port",
++                     conn->connection_number);
++                conn->stop = 1;
++                plist_free(setupResponsePlist);
++                plist_free(messagePlist);
++                return;
++              }
+ 
+               debug(2, "Connection %d: TCP PTP event port opened: %u.", conn->connection_number,
+                     conn->local_event_port);
+@@ -2690,16 +2705,30 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
+           // get a port to use as an event port
+           // bind a new TCP port and get a socket
+           conn->local_event_port = 0; // any port
+-          int lerr = bind_socket_and_port(SOCK_STREAM, conn->connection_ip_family,
+-                                          conn->self_ip_string, conn->self_scope_id,
+-                                          &conn->local_event_port, &conn->event_socket);
++          int lerr = bind_socket_and_port_range(
++              SOCK_STREAM, conn->connection_ip_family, conn->self_ip_string,
++              conn->self_scope_id, config.udp_port_base, config.udp_port_range,
++              &conn->local_event_port, &conn->event_socket);
+           if (lerr) {
+-            die("SETUP on Connection %d: Error %d: could not find a TCP port to use as an event "
+-                "port",
+-                conn->connection_number, lerr);
++            warn("SETUP on Connection %d: Error %d: could not find a TCP port "
++                 "to use as an event "
++                 "port",
++                 conn->connection_number, lerr);
++            resp->respcode = 503;
++            conn->stop = 1;
++            plist_free(setupResponsePlist);
++            plist_free(messagePlist);
++            return;
+           }
+ 
+-          listen(conn->event_socket, 128); // ensure socket is open before telling client
++          if (listen(conn->event_socket, 128) != 0) {
++            warn("Connection %d: could not listen on the bounded TCP event port",
++                 conn->connection_number);
++            conn->stop = 1;
++            plist_free(setupResponsePlist);
++            plist_free(messagePlist);
++            return;
++          }
+ 
+           debug(2, "Connection %d SETUP (RC): TCP Remote Control event port opened: %u.",
+                 conn->connection_number, conn->local_event_port);
+@@ -2795,11 +2824,19 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
+ 
+       // bind a new UDP port and get a socket
+       conn->local_ap2_control_port = 0; // any port
+-      err = bind_socket_and_port(SOCK_DGRAM, conn->connection_ip_family, conn->self_ip_string,
+-                                 conn->self_scope_id, &conn->local_ap2_control_port,
+-                                 &conn->ap2_control_socket);
++      err = bind_socket_and_port_range(
++          SOCK_DGRAM, conn->connection_ip_family, conn->self_ip_string,
++          conn->self_scope_id, config.udp_port_base, config.udp_port_range,
++          &conn->local_ap2_control_port, &conn->ap2_control_socket);
+       if (err) {
+-        die("Error %d: could not find a UDP port to use as an ap2_control port", err);
++        warn(
++            "Error %d: could not find a UDP port to use as an ap2_control port",
++            err);
++        resp->respcode = 503;
++        conn->stop = 1;
++        plist_free(setupResponsePlist);
++        plist_free(messagePlist);
++        return;
+       }
+       debug(2, "Connection %d: UDP control port opened: %u.", conn->connection_number,
+             conn->local_ap2_control_port);
+@@ -2884,11 +2921,21 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
+ 
+         // bind a new UDP port and get a socket
+         conn->local_realtime_audio_port = 0; // any port
+-        err = bind_socket_and_port(SOCK_DGRAM, conn->connection_ip_family, conn->self_ip_string,
+-                                   conn->self_scope_id, &conn->local_realtime_audio_port,
+-                                   &conn->realtime_audio_socket);
++        err = bind_socket_and_port_range(
++            SOCK_DGRAM, conn->connection_ip_family, conn->self_ip_string,
++            conn->self_scope_id, config.udp_port_base, config.udp_port_range,
++            &conn->local_realtime_audio_port, &conn->realtime_audio_socket);
+         if (err) {
+-          die("Error %d: could not find a UDP port to use as a realtime_audio port", err);
++          warn("Error %d: could not find a UDP port to use as a realtime_audio "
++               "port",
++               err);
++          resp->respcode = 503;
++          pthread_cancel(conn->rtp_ap2_control_thread);
++          pthread_join(conn->rtp_ap2_control_thread, NULL);
++          conn->stop = 1;
++          plist_free(setupResponsePlist);
++          plist_free(messagePlist);
++          return;
+         }
+         debug(2, "Connection %d: UDP realtime audio port opened: %u.", conn->connection_number,
+               conn->local_realtime_audio_port);
+@@ -2921,16 +2968,34 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
+ 
+         // bind a new TCP port and get a socket
+         conn->local_buffered_audio_port = 0; // any port
+-        err = bind_socket_and_port(SOCK_STREAM, conn->connection_ip_family, conn->self_ip_string,
+-                                   conn->self_scope_id, &conn->local_buffered_audio_port,
+-                                   &conn->buffered_audio_socket);
++        err = bind_socket_and_port_range(
++            SOCK_STREAM, conn->connection_ip_family, conn->self_ip_string,
++            conn->self_scope_id, config.udp_port_base, config.udp_port_range,
++            &conn->local_buffered_audio_port, &conn->buffered_audio_socket);
+         if (err) {
+-          die("SETUP on Connection %d: Error %d: could not find a TCP port to use as a "
+-              "buffered_audio port",
+-              conn->connection_number, err);
++          warn("SETUP on Connection %d: Error %d: could not find a TCP port to "
++               "use as a "
++               "buffered_audio port",
++               conn->connection_number, err);
++          resp->respcode = 503;
++          pthread_cancel(conn->rtp_ap2_control_thread);
++          pthread_join(conn->rtp_ap2_control_thread, NULL);
++          conn->stop = 1;
++          plist_free(setupResponsePlist);
++          plist_free(messagePlist);
++          return;
+         }
+ 
+-        listen(conn->buffered_audio_socket, 128); // ensure it's open before telling the client
++        if (listen(conn->buffered_audio_socket, 128) != 0) {
++          warn("Connection %d: could not listen on the bounded TCP buffered audio port",
++               conn->connection_number);
++          pthread_cancel(conn->rtp_ap2_control_thread);
++          pthread_join(conn->rtp_ap2_control_thread, NULL);
++          conn->stop = 1;
++          plist_free(setupResponsePlist);
++          plist_free(messagePlist);
++          return;
++        }
+ 
+         debug(2, "Connection %d: TCP Buffered Audio port opened: %u.", conn->connection_number,
+               conn->local_buffered_audio_port);
+@@ -3000,17 +3065,31 @@ void handle_setup_2(rtsp_conn_info *conn, rtsp_message *req, rtsp_message *resp)
+               // get a port to use as an data port
+               // bind a new TCP port and get a socket
+               conn->local_data_port = 0; // any port
+-              int lerr = bind_socket_and_port(SOCK_STREAM, conn->connection_ip_family,
+-                                              conn->self_ip_string, conn->self_scope_id,
+-                                              &conn->local_data_port, &conn->data_socket);
++              int lerr = bind_socket_and_port_range(
++                  SOCK_STREAM, conn->connection_ip_family, conn->self_ip_string,
++                  conn->self_scope_id, config.udp_port_base,
++                  config.udp_port_range, &conn->local_data_port,
++                  &conn->data_socket);
+               if (lerr) {
+-                die("SETUP on Connection %d (RC): Error %d: could not find a TCP port to use as a "
+-                    "data "
+-                    "port",
+-                    conn->connection_number, lerr);
++                warn("SETUP on Connection %d (RC): Error %d: could not find a "
++                     "TCP port to use as a "
++                     "data "
++                     "port",
++                     conn->connection_number, lerr);
++                resp->respcode = 503;
++                conn->stop = 1;
++                plist_free(setupResponsePlist);
++                plist_free(messagePlist);
++                return;
++              }
++              if (listen(conn->data_socket, 128) != 0) {
++                warn("Connection %d: could not listen on the bounded TCP data port",
++                     conn->connection_number);
++                conn->stop = 1;
++                plist_free(setupResponsePlist);
++                plist_free(messagePlist);
++                return;
+               }
+-              listen(conn->data_socket,
+-                     128); // open port for listening before telling the client about it!
+ 
+               debug(2, "Connection %d SETUP (RC): TCP Remote Control data port opened: %u.",
+                     conn->connection_number, conn->local_data_port);
+@@ -4013,8 +4092,13 @@ void rtsp_conversation_thread_cleanup_function(void *arg) {
+       conn->rtp_event_thread = NULL;
+     }
+     conn->ap2_event_receiver_exited = 0;
+-    debug(3, "Connection %d: %s event thread deleted.", conn->connection_number,
+-          get_category_string(conn->airplay_stream_category));
++    safe_socket_close(&conn->event_socket);
++    safe_socket_close(&conn->data_socket);
++    safe_socket_close(&conn->ap2_control_socket);
++    safe_socket_close(&conn->realtime_audio_socket);
++    safe_socket_close(&conn->buffered_audio_socket);
++    debug(3, "Connection %d: %s event thread and AP2 listener sockets deleted.",
++          conn->connection_number, get_category_string(conn->airplay_stream_category));
+ #endif
+ 
+     debug(3, "Connection %d: terminating  -- closing timing, control and audio sockets...",
