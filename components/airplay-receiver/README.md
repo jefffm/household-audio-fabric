@@ -4,19 +4,21 @@ Pinned source build of Shairport Sync 5.2.1 and NQPTP 1.2.8. The default `receiv
 
 ## Exact runtime model
 
-Run two non-root UID/GID 10001 receiver containers with host networking and one isolated shared IPC namespace. NQPTP exclusively binds UDP 319/320; Shairport listens on TCP 7000. Shairport uses the **host Avahi daemon** by read-only mounting `/run/dbus/system_bus_socket` (usually mount `/run/dbus:/run/dbus:ro`). The host's standard Avahi D-Bus policy must permit method calls to `org.freedesktop.Avahi`; `integration-test.sh` proves this by observing `_airplay._tcp` registration. The receiver image intentionally contains no D-Bus daemon, Avahi daemon/tools, FFmpeg CLI, socat, or capability tooling.
+Run a non-privileged preparation init container followed by two non-root UID/GID 10001 receiver containers with host networking and one isolated shared IPC namespace. NQPTP exclusively binds UDP 319/320; Shairport listens on TCP 7000. Shairport uses the **host Avahi daemon** by read-only mounting `/run/dbus/system_bus_socket` (usually mount `/run/dbus:/run/dbus:ro`). The host's standard Avahi D-Bus policy must permit method calls to `org.freedesktop.Avahi`; `integration-test.sh` proves this by observing `_airplay._tcp` registration. The receiver image intentionally contains no D-Bus daemon, Avahi daemon/tools, FFmpeg CLI, socat, or capability tooling.
 
-Both processes require realtime scheduling. Grant effective `SYS_NICE` and `rtprio >= 5`; NQPTP runs its main thread `SCHED_FIFO/5`, while Shairport creates FIFO/2-3 audio threads. NQPTP additionally needs effective `NET_BIND_SERVICE`. Entrypoint preflight fails closed when capabilities/limits/D-Bus/identity are absent. The shipped binaries have no file capabilities.
+Both processes require realtime scheduling. The default shell entrypoint remains appropriate for Docker-style execution and fails closed unless effective `SYS_NICE` and `RLIMIT_RTPRIO >= 5` are both visible. NQPTP runs its main thread `SCHED_FIFO/5`, while Shairport creates FIFO/2-3 audio threads; NQPTP additionally needs effective `NET_BIND_SERVICE`.
+
+Kubernetes must not launch either daemon through the shell entrypoint. Empirical K3s/containerd validation shows a requested `SYS_NICE` reaches this non-root pod only in the bounding set, not the effective or permitted sets, so even a direct `chrt` fails; Kubernetes also has no pod-level rlimit field. Instead, use the validated `audio-rt` RuntimeClass/containerd base runtime spec to set inherited `RLIMIT_RTPRIO` soft/hard to 5. Run `entrypoint.sh prepare` in a non-privileged init container: it validates D-Bus, identity, backend, and the network-boundary attestation, renders the shared config, creates the mode-0600 FIFOs, and exits without realtime preflight. Override each main container's Kubernetes `command` (OCI entrypoint) directly to `/usr/local/bin/shairport-sync` with args `-c /run/airplay/shairport-sync.conf`, or `/usr/local/bin/nqptp`; the inherited rlimit then permits their required priorities without capabilities. Drop all capabilities. NQPTP can bind UDP 319/320 only where the pod's validated `net.ipv4.ip_unprivileged_port_start=0` policy also applies. The shipped binaries have no file capabilities, so ordinary non-root Docker remains fail-closed. Readiness revalidates the boundary/config/FIFOs and proves NQPTP's actual FIFO/5 scheduler state; Shairport stream-thread scheduling remains a physical-playback gate.
 
 Example policy (translate to the deployment runtime; Docker does not propagate added capabilities to a preselected non-root user):
 
 ```text
 runAsNonRoot: true; runAsUser/runAsGroup: 10001
 allowPrivilegeEscalation: false; readOnlyRootFilesystem: true
-capabilities.drop: [ALL]
-NQPTP capabilities.add: [NET_BIND_SERVICE, SYS_NICE]
-Shairport capabilities.add: [SYS_NICE]
-rtprio hard/soft limit: 5
+capabilities.drop: [ALL]; capabilities.add: []
+RuntimeClass: audio-rt (RLIMIT_RTPRIO soft/hard = 5)
+pod sysctl/policy: net.ipv4.ip_unprivileged_port_start=0
+init command: entrypoint.sh prepare; main commands directly execute shairport-sync/nqptp (no shell exec)
 hostNetwork: true; isolated shared pod IPC; /run/airplay tmpfs; host /run/dbus read-only
 ```
 
@@ -30,7 +32,11 @@ Do not claim durable Home authorization: in upstream 5.2.1 controller pairings a
 
 ## Audio and metadata contracts
 
-Stdout is exclusively raw headerless PCM: `48000 Hz`, `S32_LE`, stereo. Never merge stderr into stdout. Software volume is ignored (`ignore_volume_control=yes`). Session and volume metadata use `/run/airplay/metadata`, a mode-0600 FIFO on the `/run/airplay` tmpfs; cover art is disabled. The upstream raw metadata stream emits volume (`pvol`) events, but synthesizing an authenticated AirPlay 2 volume event without a controller is not a truthful unit test, so that event is a physical integration gate.
+`AIRPLAY_OUTPUT_BACKEND` accepts only `stdout` (the default, preserving the existing contract) or `pipe`. Both are exclusively raw headerless `48000 Hz`, `S32_LE`, stereo PCM; never merge stderr or container logs into the PCM stream. Pipe mode creates `/run/airplay/audio` as a mode-`0600` FIFO and fails closed if that path already exists as anything other than a non-symlink FIFO. Mount `/run/airplay` from a pod-local `emptyDir` into both receiver and relay containers, with both running as UID/GID 10001.
+
+The separate `relay` target preserves its stdin mode when `RELAY_INPUT_FIFO` is unset. When `RELAY_INPUT_FIFO` names an existing absolute, non-symlink FIFO owned by its UID with mode `0600`, it reads raw bytes from that FIFO instead. Supply the destination as the sole `TCP:host:port` argument or with `RELAY_TARGET`; hosts and ports are strictly validated before `socat` starts. For example: `RELAY_INPUT_FIFO=/run/airplay/audio RELAY_TARGET=TCP:snapserver.audio.svc:4953`. The relay does not create the FIFO; the receiver owns that lifecycle and TCP backpressure propagates through the FIFO.
+
+Software volume is ignored (`ignore_volume_control=yes`). Session and volume metadata use `/run/airplay/metadata`, a mode-0600 FIFO on the `/run/airplay` tmpfs; cover art is disabled. The upstream raw metadata stream emits volume (`pvol`) events, but synthesizing an authenticated AirPlay 2 volume event without a controller is not a truthful unit test, so that event is a physical integration gate.
 
 
 ## Host boundary contract (production deployment remains gated)
@@ -55,9 +61,10 @@ IMAGE=household-audio-airplay:test ./integration-test.sh
 FORCE_TEMP_AVAHI=1 IMAGE=household-audio-airplay:test ./integration-test.sh  # exercise fallback
 
 docker build --target relay -t household-audio-relay:test -f Containerfile .
+RELAY_IMAGE=household-audio-relay:test ./relay-integration-test.sh
 ```
 
-The integration test uses host Avahi when available, otherwise launches temporary D-Bus+Avahi. It verifies live FIFO NQPTP, shared memory, Shairport TCP 7000, modern `_airplay._tcp` discovery, clean idle PCM stdout, and the metadata FIFO. A test-only file-capability derivative works around Docker's non-root capability behavior; production must use CRI-granted effective capabilities.
+The integration test uses host Avahi when available, otherwise launches temporary D-Bus+Avahi. It verifies live FIFO NQPTP, shared memory, Shairport TCP 7000, modern `_airplay._tcp` discovery, clean stdout in both output modes, rendered fixed-format pipe configuration, mode-0600 audio/metadata FIFOs, fail-closed backend/path validation, and the metadata FIFO. The relay integration sends a synthetic binary payload through a live FIFO and TCP connection and compares it byte-for-byte while requiring clean container output. A test-only file-capability derivative works around Docker's non-root capability behavior; production must use CRI-granted effective capabilities.
 
 Role-specific `healthcheck.sh` checks NQPTP bound ports/main-thread FIFO/shared timing memory and Shairport process prerequisites/TCP listener/D-Bus/metadata FIFO. It does not claim Shairport stream-thread FIFO or working PCM before a physical stream. Relay health treats a blocked process as healthy because socat is applying downstream TCP backpressure.
 

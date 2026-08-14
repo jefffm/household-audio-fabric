@@ -54,6 +54,12 @@ jobs:
       - name: Receiver live integration
         working-directory: components/airplay-receiver
         run: IMAGE=household-audio-airplay:test ./integration-test.sh
+      - name: Build relay image
+        working-directory: components/airplay-receiver
+        run: docker build --target relay -t household-audio-relay:test -f Containerfile .
+      - name: Relay live FIFO-to-TCP integration
+        working-directory: components/airplay-receiver
+        run: RELAY_SKIP_BUILD=1 RELAY_IMAGE=household-audio-relay:test ./relay-integration-test.sh
       - name: Snapserver integration
         run: components/snapserver/scripts/test
       - name: Route authority live Snapcast integration

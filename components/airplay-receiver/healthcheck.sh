@@ -12,7 +12,15 @@ case "$cmd" in
   *shairport-sync*)
     boundary_ok
     test -r /run/airplay/shairport-sync.conf
+    ! grep -q '@@' /run/airplay/shairport-sync.conf
     test -p /run/airplay/metadata
+    test "$(stat -c %a /run/airplay/metadata)" = 600
+    if grep -q 'output_backend = "pipe"' /run/airplay/shairport-sync.conf; then
+      test -p /run/airplay/audio
+      test "$(stat -c %a /run/airplay/audio)" = 600
+    else
+      grep -q 'output_backend = "stdout"' /run/airplay/shairport-sync.conf
+    fi
     test -S /run/dbus/system_bus_socket
     test -e /dev/shm/nqptp
     has_port 1B58 /proc/net/tcp || has_port 1B58 /proc/net/tcp6

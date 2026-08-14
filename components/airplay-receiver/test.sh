@@ -12,12 +12,20 @@ assert_grep -- '--with-metadata-pipe' Containerfile
 assert_grep -- '--with-avahi' Containerfile
 assert_grep -- '--with-ssl=openssl' Containerfile
 assert_grep -- '--with-stdout' Containerfile
+assert_grep -- '--with-pipe' Containerfile
 assert_grep -- '--with-ffmpeg' Containerfile
-for expected in 'service_type = "airplay2"' 'output_backend = "stdout"' 'output_rate = 48000' 'output_format = "S32_LE"' 'output_channels = 2' 'ignore_volume_control = "yes"' 'include_cover_art = "no"' 'pipe_name = "/run/airplay/metadata"' 'interface = "@@AIRPLAY_INTERFACE@@"'; do assert_grep "$expected" shairport-sync.conf.in; done
+for expected in 'service_type = "airplay2"' 'output_backend = "@@OUTPUT_BACKEND@@"' 'output_rate = 48000' 'output_format = "S32_LE"' 'output_channels = 2' 'ignore_volume_control = "yes"' 'include_cover_art = "no"' 'pipe_name = "/run/airplay/metadata"' 'interface = "@@AIRPLAY_INTERFACE@@"'; do assert_grep "$expected" shairport-sync.conf.in; done
+assert_grep '^pipe = \{' shairport-sync.conf.in
+assert_grep 'name = "/run/airplay/audio"' shairport-sync.conf.in
+assert_grep 'AIRPLAY_OUTPUT_BACKEND must be stdout or pipe' entrypoint.sh
+assert_grep 'RELAY_INPUT_FIFO must name an existing, non-symlink FIFO' relay-entrypoint.sh
+assert_grep 'RELAY_INPUT_FIFO must be mode 0600 and owned by the relay UID' relay-entrypoint.sh
 ! grep -q log_output_to shairport-sync.conf.in || fail 'obsolete log directive retained'
 assert_grep '^USER 10001:10001$' Containerfile
 assert_grep 'CAP_SYS_NICE' entrypoint.sh
 assert_grep 'CAP_NET_BIND_SERVICE' entrypoint.sh
+assert_grep 'prepare does not accept arguments' entrypoint.sh
+assert_grep 'rtprio >= \$1 is required' entrypoint.sh
 assert_grep 'AIRPLAY_DEVICE_ID.*12' entrypoint.sh
 assert_grep 'AIRPLAY_INTERFACE is required' entrypoint.sh
 assert_grep 'verified host firewall boundary' entrypoint.sh
@@ -40,9 +48,10 @@ assert_grep 'DEPENDS_ON \$libavahi_id' generate-package-inventory.sh
 assert_grep 'DEPENDS_ON \$libc_id' generate-package-inventory.sh
 ! grep -q 'amd64-amd64' generate-package-inventory.sh || fail 'package inventory hard-codes amd64 dependency IDs'
 assert_grep 'deliberately is \*\*not\*\* described as containing only those two executables' README.md
-for x in entrypoint.sh healthcheck.sh relay-entrypoint.sh relay-healthcheck.sh generate-package-inventory.sh integration-test.sh install-firewall.sh test-firewall.sh test-firewall-packets.sh; do [ -x "$x" ] || fail "$x not executable"; sh -n "$x"; done
+for x in entrypoint.sh healthcheck.sh relay-entrypoint.sh relay-healthcheck.sh generate-package-inventory.sh integration-test.sh install-firewall.sh test-firewall.sh test-firewall-packets.sh test-entrypoints.sh relay-integration-test.sh; do [ -x "$x" ] || fail "$x not executable"; sh -n "$x"; done
 ./test-firewall.sh
 ./test-firewall-packets.sh
+./test-entrypoints.sh
 if grep -Eq 'setcap .*usr/local/bin/(nqptp|shairport)' Containerfile; then fail 'production image embeds file capabilities'; fi
 
 if [ -n "${IMAGE:-}" ]; then
