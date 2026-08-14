@@ -2,7 +2,9 @@
 set -eu
 command -v unshare >/dev/null && command -v socat >/dev/null || { echo 'SKIP: packet tools unavailable'; exit 0; }
 here=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
-unshare -Urn sh -eu -c '
+ns_flags=-Urn
+[ "$(id -u)" -ne 0 ] || ns_flags=-n
+unshare $ns_flags sh -eu -c '
   p1= p2=; cleanup(){ [ -z "$p1" ] || kill "$p1" 2>/dev/null ||:; [ -z "$p2" ] || kill "$p2" 2>/dev/null ||:; }; trap cleanup EXIT
   ip link set lo up
   unshare -n sleep 60 & p1=$!; ip link add audio0 type veth peer name peer0; ip addr add 192.0.2.1/24 dev audio0; ip -6 addr add 2001:db8:1::1/64 dev audio0 nodad; ip link set audio0 up; ip link set peer0 netns $p1

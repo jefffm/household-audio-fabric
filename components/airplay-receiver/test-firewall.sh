@@ -10,9 +10,11 @@ for rule in \
  'ip6 saddr @@IPV6_CIDR@@ udp dport { 319, 320 } accept' \
  'udp dport { 319, 320 } reject'; do grep -F "$rule" "$f" >/dev/null; done
 if command -v unshare >/dev/null && command -v nft >/dev/null; then
+  ns_flags=-Urn
+  [ "$(id -u)" -ne 0 ] || ns_flags=-n
   td=$(mktemp -d); trap 'rm -rf "$td"' EXIT
   here=$PWD
-  unshare -Urn sh -eu -c '
+  unshare $ns_flags sh -eu -c '
     ip link set lo up
     export AIRPLAY_INTERFACE=lo AIRPLAY_ALLOWED_IPV4_CIDR=127.0.0.0/8 AIRPLAY_ALLOWED_IPV6_CIDR=::1/128
     export AIRPLAY_BOUNDARY_ATTESTATION="$1/verified" AIRPLAY_NFT_RENDERED="$1/rendered.nft"

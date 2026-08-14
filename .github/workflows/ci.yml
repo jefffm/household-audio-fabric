@@ -20,7 +20,7 @@ jobs:
         with:
           persist-credentials: false
       - name: AirPlay receiver contract tests
-        run: components/airplay-receiver/test.sh
+        run: sudo env PATH="$PATH" components/airplay-receiver/test.sh
       - name: Snapserver package contract tests
         run: SKIP_INTEGRATION=1 components/snapserver/scripts/test
       - name: Rust toolchain
@@ -50,7 +50,7 @@ jobs:
         run: docker build --target receiver -t household-audio-airplay:test -f Containerfile .
       - name: Receiver image contract tests
         working-directory: components/airplay-receiver
-        run: IMAGE=household-audio-airplay:test ./test.sh
+        run: sudo env PATH="$PATH" IMAGE=household-audio-airplay:test ./test.sh
       - name: Receiver live integration
         working-directory: components/airplay-receiver
         run: IMAGE=household-audio-airplay:test ./integration-test.sh
