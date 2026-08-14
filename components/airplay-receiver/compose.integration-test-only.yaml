@@ -1,0 +1,39 @@
+# INTEGRATION TEST ONLY. NOT A VALIDATED OR RUNNABLE PRODUCTION DEPLOYMENT.
+services:
+  nqptp:
+    image: ${AIRPLAY_TEST_CAP_IMAGE:?test-only file-capability derivative required}
+    command: [nqptp]
+    user: "10001:10001"
+    network_mode: host
+    ipc: shareable
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [NET_BIND_SERVICE, SYS_NICE]
+    ulimits: {rtprio: {soft: 5, hard: 5}}
+    tmpfs: ["/run/airplay:uid=10001,gid=10001,mode=0700"]
+    volumes:
+      - ${AIRPLAY_BOUNDARY_DIR:?}:/run/airplay-boundary:ro
+    environment: &boundary
+      AIRPLAY_INTERFACE: ${AIRPLAY_INTERFACE:?}
+      AIRPLAY_ALLOWED_IPV4_CIDR: ${AIRPLAY_ALLOWED_IPV4_CIDR:?}
+      AIRPLAY_ALLOWED_IPV6_CIDR: ${AIRPLAY_ALLOWED_IPV6_CIDR:?}
+  shairport:
+    image: ${AIRPLAY_TEST_CAP_IMAGE:?test-only file-capability derivative required}
+    command: [shairport]
+    user: "10001:10001"
+    network_mode: host
+    ipc: service:nqptp
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [SYS_NICE]
+    ulimits: {rtprio: {soft: 5, hard: 5}}
+    tmpfs: ["/run/airplay:uid=10001,gid=10001,mode=0700"]
+    volumes:
+      - /run/dbus:/run/dbus:ro
+      - ${AIRPLAY_BOUNDARY_DIR:?}:/run/airplay-boundary:ro
+    environment:
+      <<: *boundary
+      AIRPLAY_NAME: ${AIRPLAY_NAME:-Household Audio}
+      AIRPLAY_DEVICE_ID: ${AIRPLAY_DEVICE_ID:?SOPS-injected stable identity required}

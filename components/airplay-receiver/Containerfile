@@ -1,0 +1,102 @@
+# syntax=docker/dockerfile:1.7
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+FROM ${DEBIAN_IMAGE} AS build
+
+ARG DEBIAN_SNAPSHOT=20260803T000000Z
+ARG SHAIRPORT_SYNC_VERSION=5.2.1
+ARG SHAIRPORT_SYNC_SHA256=8f97d1a6e045bc3765b10d0cd64abe467eba343af89fa1e158f7fa28b73c4ab6
+ARG NQPTP_VERSION=1.2.8
+ARG NQPTP_SHA256=3a2882a299c21605f53bb215ce537f9cc7a1e894476f639ab28562c68fd183a9
+
+RUN printf '%s\n' \
+      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bookworm main" \
+      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} bookworm-security main" \
+      > /etc/apt/sources.list \
+ && rm -f /etc/apt/sources.list.d/debian.sources \
+ && apt-get -o Acquire::Check-Valid-Until=false update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      autoconf automake build-essential ca-certificates curl libtool pkg-config xxd \
+      libavahi-client-dev libconfig-dev libgcrypt20-dev \
+      libplist-dev libplist-utils libpopt-dev libsodium-dev libsoxr-dev libssl-dev \
+      libavcodec-dev libavformat-dev libavutil-dev libswresample-dev uuid-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+RUN curl -fsSL "https://github.com/mikebrady/nqptp/archive/refs/tags/${NQPTP_VERSION}.tar.gz" -o nqptp.tar.gz \
+ && echo "${NQPTP_SHA256}  nqptp.tar.gz" | sha256sum -c - \
+ && mkdir nqptp && tar -xzf nqptp.tar.gz --strip-components=1 -C nqptp \
+ && cd nqptp && autoreconf -fi && ./configure --prefix=/usr/local --without-systemd-startup \
+ && make -j"$(nproc)" && make install DESTDIR=/out \
+ && install -D -m0644 COPYING /out/usr/share/doc/nqptp/COPYING \
+ && install -m0644 LICENSE /out/usr/share/doc/nqptp/LICENSE
+
+RUN curl -fsSL "https://github.com/mikebrady/shairport-sync/archive/refs/tags/${SHAIRPORT_SYNC_VERSION}.tar.gz" -o shairport-sync.tar.gz \
+ && echo "${SHAIRPORT_SYNC_SHA256}  shairport-sync.tar.gz" | sha256sum -c - \
+ && mkdir shairport-sync && tar -xzf shairport-sync.tar.gz --strip-components=1 -C shairport-sync \
+ && cd shairport-sync && autoreconf -fi \
+ && ./configure --prefix=/usr/local --sysconfdir=/etc \
+      --with-airplay-2 --with-avahi --with-ffmpeg --with-ssl=openssl \
+      --with-pipe --with-stdout --with-soxr --with-metadata --with-metadata-pipe \
+      --without-alsa --without-pulseaudio --without-systemd-startup \
+      --without-create-user-group --without-configfiles \
+ && make -j"$(nproc)" && make install DESTDIR=/out \
+ && install -D -m0644 COPYING /out/usr/share/doc/shairport-sync/COPYING \
+ && cp -a LICENSES /out/usr/share/doc/shairport-sync/LICENSES
+
+FROM ${DEBIAN_IMAGE} AS runtime
+ARG DEBIAN_SNAPSHOT=20260803T000000Z
+ARG SHAIRPORT_SYNC_VERSION=5.2.1
+ARG NQPTP_VERSION=1.2.8
+LABEL org.opencontainers.image.title="household-audio-airplay" \
+      org.opencontainers.image.description="Split-container AirPlay 2 PCM receiver" \
+      org.opencontainers.image.version="shairport-sync-${SHAIRPORT_SYNC_VERSION}_nqptp-${NQPTP_VERSION}" \
+      org.opencontainers.image.source="https://github.com/jefffm/household-audio-fabric"
+RUN printf '%s\n' \
+      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bookworm main" \
+      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/${DEBIAN_SNAPSHOT} bookworm-security main" \
+      > /etc/apt/sources.list \
+ && rm -f /etc/apt/sources.list.d/debian.sources \
+ && apt-get -o Acquire::Check-Valid-Until=false update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      libavahi-client3 libavcodec59 libavformat59 libavutil57 libconfig9 \
+      libgcrypt20 libplist3 libpopt0 libsodium23 libsoxr0 libssl3 libswresample4 libuuid1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 10001 airplay && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent airplay \
+ && install -d -o 10001 -g 10001 /run/airplay
+COPY --from=build /out/ /
+COPY shairport-sync.conf.in /etc/shairport-sync.conf.in
+COPY entrypoint.sh healthcheck.sh generate-package-inventory.sh /usr/local/bin/
+COPY SOURCES.lock LICENSES.md /usr/share/doc/household-audio-airplay/
+COPY LICENSE /usr/share/doc/household-audio-fabric/LICENSE
+RUN chmod 0755 /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/generate-package-inventory.sh \
+ && chmod 0644 /etc/shairport-sync.conf.in \
+ && /usr/local/bin/generate-package-inventory.sh
+USER 10001:10001
+EXPOSE 7000/tcp 319/udp 320/udp 5353/udp
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+CMD ["shairport"]
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD ["/usr/local/bin/healthcheck.sh"]
+
+
+FROM ${DEBIAN_IMAGE} AS relay
+ARG DEBIAN_SNAPSHOT=20260803T000000Z
+RUN printf '%s\n' \
+      "deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/${DEBIAN_SNAPSHOT} bookworm main" \
+      > /etc/apt/sources.list \
+ && rm -f /etc/apt/sources.list.d/debian.sources \
+ && apt-get -o Acquire::Check-Valid-Until=false update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends socat \
+ && rm -rf /var/lib/apt/lists/* \
+ && groupadd --gid 10001 relay && useradd --uid 10001 --gid 10001 --no-create-home relay
+COPY relay-entrypoint.sh relay-healthcheck.sh /usr/local/bin/
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/relay-entrypoint.sh"]
+HEALTHCHECK CMD ["/usr/local/bin/relay-healthcheck.sh"]
+
+FROM runtime AS integration-support
+USER 0:0
+RUN apt-get -o Acquire::Check-Valid-Until=false update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends avahi-daemon avahi-utils dbus libcap2-bin \
+ && rm -rf /var/lib/apt/lists/*
+
+FROM runtime AS receiver

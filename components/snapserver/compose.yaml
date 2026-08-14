@@ -1,0 +1,46 @@
+services:
+  snapserver:
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: server
+    image: household-audio-snapserver:0.35.0-tracer
+    ports:
+      - "127.0.0.1:${SNAPCAST_STREAM_PORT:-11704}:11704"
+      - "127.0.0.1:${SNAPCAST_CONTROL_PORT:-11705}:11705"
+      - "127.0.0.1:${SNAPCAST_HTTP_PORT:-11780}:11780"
+      - "127.0.0.1:${AIRPLAY_PCM_PORT:-14953}:14953"
+      - "127.0.0.1:${MA_TEST_PCM_PORT:-14954}:14954"
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:uid=100,gid=101,mode=0700
+      - /var/lib/snapserver:uid=100,gid=101,mode=0700
+    healthcheck:
+      test: ["CMD", "/bin/bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/11780"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    restart: unless-stopped
+
+  snapclient-test:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Containerfile
+      target: test
+    image: household-audio-snapclient-test:0.35.0-tracer
+    depends_on:
+      snapserver:
+        condition: service_healthy
+    command: ["--host", "snapserver", "--port", "11704", "--hostID", "tracer-test", "--player", "file:filename=/output/decoded.pcm", "--logsink", "stdout"]
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:uid=100,gid=101,mode=0700
+      - /var/lib/snapserver:uid=100,gid=101,mode=0700
+    volumes:
+      - "${TEST_OUTPUT_DIR:-./.test-output}:/output"
+    restart: "no"

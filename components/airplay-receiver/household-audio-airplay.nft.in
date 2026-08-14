@@ -1,0 +1,11 @@
+table inet household_audio_airplay {
+  chain ingress {
+    type filter hook input priority -5; policy accept;
+    iifname "@@INTERFACE@@" ip saddr @@IPV4_CIDR@@ tcp dport 7000 accept
+    iifname "@@INTERFACE@@" ip6 saddr @@IPV6_CIDR@@ tcp dport 7000 accept
+    tcp dport 7000 reject with tcp reset
+    iifname "@@INTERFACE@@" ip saddr @@IPV4_CIDR@@ udp dport { 319, 320 } accept
+    iifname "@@INTERFACE@@" ip6 saddr @@IPV6_CIDR@@ udp dport { 319, 320 } accept
+    udp dport { 319, 320 } reject
+  }
+}

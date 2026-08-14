@@ -1,0 +1,27 @@
+// Rendered by entrypoint.sh. stdout is raw headerless PCM.
+general = {
+  name = "@@AIRPLAY_NAME@@";
+  interface = "@@AIRPLAY_INTERFACE@@";
+  service_type = "airplay2";
+  airplay_device_id = 0x@@AIRPLAY_DEVICE_ID@@L;
+  output_backend = "stdout";
+  mdns_backend = "avahi";
+  playback_mode = "stereo";
+  ignore_volume_control = "yes";
+};
+
+stdout = {
+  output_rate = 48000;
+  output_format = "S32_LE";
+  output_channels = 2;
+};
+
+metadata = {
+  enabled = "yes";
+  include_cover_art = "no";
+  pipe_name = "/run/airplay/metadata";
+};
+
+diagnostics = {
+  log_verbosity = 1;
+};

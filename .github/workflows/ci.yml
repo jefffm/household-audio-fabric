@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  static-and-unit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: AirPlay receiver contract tests
+        run: components/airplay-receiver/test.sh
+      - name: Snapserver package contract tests
+        run: SKIP_INTEGRATION=1 components/snapserver/scripts/test
+      - name: Rust toolchain
+        working-directory: components/route-authority
+        run: |
+          rustc --version --verbose | grep -F "release: 1.95.0"
+          cargo --version
+      - name: Rust format
+        working-directory: components/route-authority
+        run: cargo fmt --check
+      - name: Rust lint
+        working-directory: components/route-authority
+        run: cargo clippy --all-targets --all-features --locked -- -D warnings
+      - name: Rust tests
+        working-directory: components/route-authority
+        run: cargo test --all-features --locked
+
+  container-integration:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Build receiver image
+        working-directory: components/airplay-receiver
+        run: docker build --target receiver -t household-audio-airplay:test -f Containerfile .
+      - name: Receiver image contract tests
+        working-directory: components/airplay-receiver
+        run: IMAGE=household-audio-airplay:test ./test.sh
+      - name: Receiver live integration
+        working-directory: components/airplay-receiver
+        run: IMAGE=household-audio-airplay:test ./integration-test.sh
+      - name: Snapserver integration
+        run: components/snapserver/scripts/test
+      - name: Route authority live Snapcast integration
+        run: components/route-authority/tests/live-snapcast.sh

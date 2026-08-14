@@ -1,0 +1,60 @@
+ARG DEBIAN_IMAGE=debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+ARG SNAPSHOT=20260810T000000Z
+
+FROM ${DEBIAN_IMAGE} AS fetch
+ARG TARGETARCH
+ARG SNAPCAST_VERSION=0.35.0
+ARG SNAPSHOT
+RUN set -eux; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s bookworm main\n' "$SNAPSHOT" > /etc/apt/sources.list; \
+    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s bookworm-security main\n' "$SNAPSHOT" >> /etc/apt/sources.list; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    apt-get install -y --no-install-recommends ca-certificates=20250419~deb12u1 curl=7.88.1-10+deb12u15; \
+    case "$TARGETARCH" in \
+      amd64) deb_arch=amd64; server_sha=afb012318bb8cbf82c63c2084de3b290f53108c49976ff364100882cd8816b41; client_sha=b71575bcc2b4541f5004c73a0a1f43374e852bf5d5f2162aa1b230f3c209d9f3 ;; \
+      arm64) deb_arch=arm64; server_sha=526cded407fad5940e834d77cf66a3b7ebac68931a530be55179f60d327044fd; client_sha=83afa0910cce99c0e6d4a52ec1849240c9956f5147e0743d60d4dd5f3b11af1a ;; \
+      arm) deb_arch=armhf; server_sha=3c05ae3057182c1c3bb8cd1f4ae4ad0500f30bae04147765ea4704f3d00b646a; client_sha=b532928974d5fa1bef8aa44e7400fb47ee3e91cede319c90cf830d23cf18ddb2 ;; \
+      *) echo "unsupported TARGETARCH: $TARGETARCH" >&2; exit 1 ;; \
+    esac; \
+    base="https://github.com/snapcast/snapcast/releases/download/v${SNAPCAST_VERSION}"; \
+    curl -fsSL "$base/snapserver_${SNAPCAST_VERSION}-1_${deb_arch}_bookworm.deb" -o /snapserver.deb; \
+    curl -fsSL "$base/snapclient_${SNAPCAST_VERSION}-1_${deb_arch}_bookworm.deb" -o /snapclient.deb; \
+    echo "$server_sha  /snapserver.deb" | sha256sum -c -; \
+    echo "$client_sha  /snapclient.deb" | sha256sum -c -
+
+FROM ${DEBIAN_IMAGE} AS runtime-base
+ARG SNAPSHOT
+COPY packages.lock /tmp/packages.lock
+COPY --from=fetch /snapserver.deb /tmp/snapserver.deb
+RUN set -eux; \
+    rm -rf /etc/apt/sources.list.d/*; \
+    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian/%s bookworm main\n' "$SNAPSHOT" > /etc/apt/sources.list; \
+    printf 'deb [check-valid-until=no] http://snapshot.debian.org/archive/debian-security/%s bookworm-security main\n' "$SNAPSHOT" >> /etc/apt/sources.list; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    xargs -r apt-get install -y --no-install-recommends < /tmp/packages.lock; \
+    apt-get install -y --no-install-recommends /tmp/snapserver.deb; \
+    test "$(dpkg-query -W -f='${Version}' snapserver)" = 0.35.0-1; \
+    rm -rf /var/lib/apt/lists/* /tmp/*.deb /tmp/packages.lock; \
+    install -d -o snapserver -g snapserver /var/lib/snapserver
+
+FROM runtime-base AS test
+COPY --from=fetch /snapclient.deb /tmp/snapclient.deb
+USER root
+RUN set -eux; \
+    apt-get -o Acquire::Check-Valid-Until=false update; \
+    apt-get install -y --no-install-recommends /tmp/snapclient.deb; \
+    test "$(dpkg-query -W -f='${Version}' snapclient)" = 0.35.0-1; \
+    rm -rf /var/lib/apt/lists/* /tmp/snapclient.deb
+USER snapserver:snapserver
+ENTRYPOINT ["/usr/bin/snapclient"]
+
+FROM runtime-base AS server
+LABEL org.opencontainers.image.source="https://github.com/jefffm/household-audio-fabric" \
+      org.opencontainers.image.version="0.35.0"
+COPY snapserver.conf /etc/snapserver.conf
+COPY LICENSE /usr/share/doc/household-audio-fabric/LICENSE
+USER snapserver:snapserver
+EXPOSE 11704 11705 11780 14953 14954
+ENTRYPOINT ["/usr/bin/snapserver"]
+CMD ["--config", "/etc/snapserver.conf"]

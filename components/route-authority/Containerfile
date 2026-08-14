@@ -1,0 +1,18 @@
+# syntax=docker/dockerfile:1.7
+FROM docker.io/library/rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS build
+WORKDIR /src
+COPY components/route-authority/Cargo.toml components/route-authority/Cargo.lock ./
+RUN mkdir src && printf 'fn main() {}' > src/main.rs && cargo build --release --locked && rm -rf src target/release/deps/household_audio_router*
+COPY components/route-authority/src ./src
+RUN cargo build --release --locked && strip target/release/household-audio-router
+
+FROM docker.io/library/debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
+LABEL org.opencontainers.image.title="household-audio-router" \
+      org.opencontainers.image.description="Serialized household audio route lease authority" \
+      org.opencontainers.image.source="https://github.com/jefffm/household-audio-fabric"
+RUN groupadd --system --gid 65532 router && useradd --system --uid 65532 --gid 65532 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin router
+COPY --from=build --chown=65532:65532 /src/target/release/household-audio-router /usr/local/bin/household-audio-router
+COPY --chown=65532:65532 components/route-authority/LICENSE /usr/share/doc/household-audio-fabric/LICENSE
+USER 65532:65532
+EXPOSE 8080
+ENTRYPOINT ["/usr/local/bin/household-audio-router"]
