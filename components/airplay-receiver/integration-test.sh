@@ -38,6 +38,7 @@ set -e
 docker run --rm -v "$busmount" $common_mount -v "$prepared:/run/airplay" $common_env -e AIRPLAY_NAME="$name" -e AIRPLAY_DEVICE_ID="$id" -e AIRPLAY_OUTPUT_BACKEND=pipe --entrypoint entrypoint.sh "$CAPIMAGE" prepare >"$out" 2>"$err"
 [ ! -s "$out" ] || { echo 'prepare contaminated stdout' >&2; exit 1; }
 grep -F 'output_backend = "pipe";' "$prepared/shairport-sync.conf" >/dev/null
+grep -F 'ignore_volume_control = "no";' "$prepared/shairport-sync.conf" >/dev/null
 [ -p "$prepared/audio" ] && [ "$(stat -c %a "$prepared/audio")" = 600 ]
 [ -p "$prepared/metadata" ] && [ "$(stat -c %a "$prepared/metadata")" = 600 ]
 
@@ -48,6 +49,7 @@ start_receiver() {
   : >"$out"; : >"$err"
   docker run --name "$rx" --cap-add SYS_NICE --network host --ipc "container:$nq" --ulimit rtprio=5 -v "$busmount" $common_mount $common_env -e AIRPLAY_NAME="$name" -e AIRPLAY_DEVICE_ID="$id" -e AIRPLAY_OUTPUT_BACKEND="$backend" --entrypoint entrypoint.sh "$CAPIMAGE" shairport >"$out" 2>"$err" &
   sleep 4; docker exec "$rx" healthcheck.sh; [ ! -s "$out" ]
+  grep -F 'ignore_volume_control is 0.' "$err" >/dev/null
 }
 record() {
   sh -c "$browse_cmd" | awk -v n="$name" -v i="$iface" '
@@ -75,6 +77,7 @@ docker rm -f "$rx" >/dev/null; sleep 2
 : >"$out"; : >"$err"
 docker run --name "$rx" --cap-drop ALL --ulimit rtprio=5 --network host --ipc "container:$nq" -v "$busmount" -v "$prepared:/run/airplay" $common_mount $common_env --entrypoint /usr/local/bin/shairport-sync "$IMAGE" -c /run/airplay/shairport-sync.conf >"$out" 2>"$err" &
 sleep 4; docker exec "$rx" healthcheck.sh; [ ! -s "$out" ]
+grep -F 'ignore_volume_control is 0.' "$err" >/dev/null
 docker exec "$rx" grep -F 'output_backend = "pipe";' /run/airplay/shairport-sync.conf >/dev/null
 docker exec "$rx" grep -A5 '^pipe = {' /run/airplay/shairport-sync.conf | grep -F 'name = "/run/airplay/audio";' >/dev/null
 docker exec "$rx" grep -A5 '^pipe = {' /run/airplay/shairport-sync.conf | grep -F 'output_rate = 48000;' >/dev/null

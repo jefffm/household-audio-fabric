@@ -7,7 +7,8 @@ general = {
   output_backend = "@@OUTPUT_BACKEND@@";
   mdns_backend = "avahi";
   playback_mode = "stereo";
-  ignore_volume_control = "yes";
+  // Apply sender volume/mute to this source's PCM, not Snapcast endpoint volume.
+  ignore_volume_control = "no";
   // Patched AirPlay 2 event, control, and data listeners are confined here.
   udp_port_base = 6001;
   udp_port_range = 10;

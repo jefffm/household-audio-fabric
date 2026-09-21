@@ -19,7 +19,7 @@ assert_grep 'patch --batch --fuzz=0 -p1' Containerfile
 assert_grep '^\+int bind_socket_and_port_range' shairport-sync-5.2.1-bounded-ap2-ports.patch
 assert_grep '^  udp_port_base = 6001;' shairport-sync.conf.in
 assert_grep '^  udp_port_range = 10;' shairport-sync.conf.in
-for expected in 'service_type = "airplay2"' 'output_backend = "@@OUTPUT_BACKEND@@"' 'output_rate = 48000' 'output_format = "S32_LE"' 'output_channels = 2' 'ignore_volume_control = "yes"' 'include_cover_art = "no"' 'pipe_name = "/run/airplay/metadata"' 'interface = "@@AIRPLAY_INTERFACE@@"'; do assert_grep "$expected" shairport-sync.conf.in; done
+for expected in 'service_type = "airplay2"' 'output_backend = "@@OUTPUT_BACKEND@@"' 'output_rate = 48000' 'output_format = "S32_LE"' 'output_channels = 2' 'ignore_volume_control = "no"' 'include_cover_art = "no"' 'pipe_name = "/run/airplay/metadata"' 'interface = "@@AIRPLAY_INTERFACE@@"'; do assert_grep "$expected" shairport-sync.conf.in; done
 assert_grep '^pipe = \{' shairport-sync.conf.in
 assert_grep 'name = "/run/airplay/audio"' shairport-sync.conf.in
 assert_grep 'AIRPLAY_OUTPUT_BACKEND must be stdout or pipe' entrypoint.sh
