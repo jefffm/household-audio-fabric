@@ -1,10 +1,11 @@
 # Household Audio Fabric
 
-Household Audio Fabric is a reference implementation for receiving network audio, arbitrating which source owns an output target, and distributing synchronized PCM audio. It is organized as three independently buildable components:
+Household Audio Fabric is a reference implementation for receiving network audio, arbitrating which source owns an output target, and distributing synchronized PCM audio. It is organized as independently buildable components:
 
 - [`airplay-receiver`](components/airplay-receiver): a pinned Shairport Sync and NQPTP receiver that emits raw PCM and metadata.
 - [`route-authority`](components/route-authority): a single-replica Rust lease authority that reconciles desired routes through Snapcast JSON-RPC.
 - [`snapserver`](components/snapserver): a pinned Snapcast server image and an isolated integration-test client.
+- [`announcer`](components/announcer): authenticated, bounded local speech announcements through a direct Immortal MQTT/private-WAV path, without rerouting music.
 
 A typical deployment sends receiver PCM to a named Snapserver TCP stream. Authenticated adapters request time-bounded route leases; the authority applies policy and selects the corresponding Snapcast stream. Endpoints consume synchronized streams through Snapclients.
 

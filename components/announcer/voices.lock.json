@@ -1,0 +1,9 @@
+{
+  "revision": "c10ece1aade47bb51c153c893d14e5bf8e5b7117",
+  "base_url": "https://huggingface.co/rhasspy/piper-voices/resolve/c10ece1aade47bb51c153c893d14e5bf8e5b7117/en/en_US/ljspeech/medium/",
+  "license": "Public domain model and dataset; see LICENSES.md",
+  "files": {
+    "en_US-ljspeech-medium.onnx": "6f52a751e2349abe7a76735eb09dc1875298c77ea2342ffd2fef79ff81b87f22",
+    "en_US-ljspeech-medium.onnx.json": "141d612cc0a95ed7efc1ca936b845c2364967f2e9217c5dbfcf69fc4d6c65860"
+  }
+}

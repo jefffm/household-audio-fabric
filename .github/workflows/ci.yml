@@ -12,6 +12,23 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  announcer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+        with:
+          persist-credentials: false
+      - name: Test local speech, HTTP, MQTT, media and crash recovery
+        working-directory: components/announcer
+        run: |
+          python3 -m venv .venv
+          .venv/bin/pip install --require-hashes --only-binary=:all: -r requirements.lock
+          .venv/bin/python fetch_voice.py voice
+          .venv/bin/python -m compileall -q announcer tests
+          ANNOUNCER_TEST_MODEL="$PWD/voice/en_US-ljspeech-medium.onnx" .venv/bin/python -m unittest discover -s tests -v
+          podman build -f Containerfile -t household-announcer:test .
+
   static-and-unit:
     runs-on: ubuntu-24.04
     timeout-minutes: 20

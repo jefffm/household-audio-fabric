@@ -14,4 +14,8 @@ Snapcast 0.35.0 server and test-client packages are downloaded from the upstream
 
 Rust dependency names, exact versions, checksums, and registry sources are preserved in `components/route-authority/Cargo.lock`. Each crate remains under its own declared license. Use `cargo metadata` or a dedicated license-audit tool when preparing a distribution.
 
+## Announcer image
+
+The announcer includes GPL-3.0-or-later Piper TTS 1.8.0, Paho MQTT 2.1.0 and their separately licensed dependencies. Package versions/hashes are in `components/announcer/requirements.lock`; installed package notices remain in the image. The LJSpeech medium model and dataset are public domain per their respective authors, with immutable model hashes in `voices.lock.json`. See the component's `LICENSES.md` for primary sources and redistribution obligations.
+
 A container image is a combined distribution of many separately licensed works. Do not describe an image as simply “MIT.” Before redistribution, inspect the complete architecture-specific package inventory and license files, preserve notices, and provide source or a source offer wherever the GPL/LGPL terms require it. This notice is informational and not legal advice.
