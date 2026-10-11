@@ -1,6 +1,7 @@
 """Authenticated announcement admission and durable, single-replica lifecycle."""
 
 import array
+import base64
 import fcntl
 import hashlib
 import hmac
@@ -110,6 +111,25 @@ class Service:
                         alive = not hasattr(service, "worker") or service.worker.is_alive()
                         self.respond(200 if alive else 503, {"status": "ok" if alive else "failed"})
                         return
+                    output_route = re.fullmatch(r"/v1/outputs/([A-Za-z0-9_-]{1,64})/(next|[a-f0-9]{32}/result)", self.path)
+                    if output_route:
+                        name, action = output_route.groups()
+                        service.authenticate_output(name, self.headers.get("Authorization", ""))
+                        if self.command != "POST" or self.headers.get("Transfer-Encoding"):
+                            raise HttpError(400, "invalid_request")
+                        length = self.headers.get("Content-Length", "0")
+                        if not length.isdecimal() or int(length) > 128:
+                            raise HttpError(413, "request_too_large")
+                        if action == "next":
+                            if int(length) != 0:
+                                raise HttpError(400, "empty_body_required")
+                            self.respond(200, {"announcement": service.claim(name)})
+                        else:
+                            if self.headers.get_content_type() != "application/json" or not int(length):
+                                raise HttpError(415, "json_required")
+                            body = json.loads(self.rfile.read(int(length)))
+                            self.respond(200, service.result(name, action.split("/")[0], body))
+                        return
                     caller = service.authenticate(self.headers.get("Authorization", ""))
                     if self.command == "POST" and self.path == "/v1/announcements":
                         if self.headers.get_content_type() != "application/json":
@@ -143,6 +163,60 @@ class Service:
             if hmac.compare_digest(digest, caller["token_sha256"]):
                 return name
         raise HttpError(401, "unauthorized")
+
+    def authenticate_output(self, name, authorization):
+        output = self.config["outputs"].get(name, {})
+        digest = hashlib.sha256(authorization[7:].encode()).hexdigest()
+        if (not authorization.startswith("Bearer ") or output.get("transport") != "home_today"
+                or not hmac.compare_digest(digest, output.get("token_sha256", ""))):
+            raise HttpError(401, "unauthorized")
+
+    def claim(self, name):
+        with self.lock, self.db:
+            self.cleanup()
+            row = self.db.execute("SELECT j.* FROM jobs j JOIN deliveries d ON j.id=d.job WHERE d.output=? AND d.status='ready' AND j.status!='synthesizing' ORDER BY j.created LIMIT 1", (name,)).fetchone()
+            if not row:
+                return None
+            if (row["topic"] not in self.config["outputs"][name]["topics"]
+                    or row["topic"] not in self.config["callers"].get(row["caller"], {}).get("topics", [])):
+                self.db.execute("UPDATE deliveries SET status='failed' WHERE job=? AND output=?", (row["id"], name))
+                self.refresh(row["id"])
+                return None
+            path = self.directory / f"{row['id']}.wav"
+            try:
+                if path.stat().st_size > 441044:
+                    raise ValueError("invalid clip")
+                data = path.read_bytes()
+            except (OSError, ValueError):
+                self.db.execute("UPDATE deliveries SET status='failed' WHERE job=? AND output=?", (row["id"], name))
+                self.refresh(row["id"])
+                return None
+            remaining = int((row["expires"] - time.time()) * 1000)
+            if remaining <= 0:
+                return None
+            # Consume before response bytes leave. A lost response is a dropped
+            # announcement, never an automatic replay after reconnect/restart.
+            self.db.execute("UPDATE deliveries SET status='claimed' WHERE job=? AND output=?", (row["id"], name))
+            self.refresh(row["id"])
+            return {"id": row["id"], "text": row["text"], "remaining_ms": min(30000, remaining),
+                    "wav_base64": base64.b64encode(data).decode("ascii")}
+
+    def result(self, name, job, body):
+        allowed = {"completed_unconfirmed", "dismissed", "interrupted", "failed", "expired"}
+        if not isinstance(body, dict) or set(body) != {"status"} or not isinstance(body["status"], str) or body["status"] not in allowed:
+            raise HttpError(400, "invalid_result")
+        with self.lock, self.db:
+            self.cleanup()
+            row = self.db.execute("SELECT status FROM deliveries WHERE job=? AND output=?", (job, name)).fetchone()
+            if not row:
+                raise HttpError(404, "not_found")
+            if row["status"] == body["status"]:
+                return body
+            if row["status"] not in {"claimed", "uncertain"}:
+                raise HttpError(409, "result_conflict")
+            self.db.execute("UPDATE deliveries SET status=? WHERE job=? AND output=?", (body["status"], job, name))
+            self.refresh(job)
+            return body
 
     def accept(self, caller, key, body):
         if not isinstance(body, dict) or set(body) != {"topic", "text", "ttl_seconds"}:
@@ -181,6 +255,11 @@ class Service:
 
     def cleanup(self):
         now = time.time()
+        changed = self.db.execute("SELECT DISTINCT job FROM deliveries d JOIN jobs j ON d.job=j.id WHERE (d.status='ready' AND j.expires<=?) OR (d.status='claimed' AND j.expires+15<=?)", (now, now)).fetchall()
+        self.db.execute("UPDATE deliveries SET status='expired' WHERE status='ready' AND job IN (SELECT id FROM jobs WHERE expires<=?)", (now,))
+        self.db.execute("UPDATE deliveries SET status='uncertain' WHERE status='claimed' AND job IN (SELECT id FROM jobs WHERE expires+15<=?)", (now,))
+        for row in changed:
+            self.refresh(row[0])
         self.db.execute("UPDATE deliveries SET status='expired' WHERE status='accepted' AND job IN (SELECT id FROM jobs WHERE expires<=?)", (now,))
         self.db.execute("UPDATE jobs SET status='expired',text='' WHERE status='accepted' AND expires<=?", (now,))
         self.db.execute("DELETE FROM deliveries WHERE job IN (SELECT id FROM jobs WHERE created<?)", (now - 86400,))
@@ -202,15 +281,15 @@ class Service:
 
     def refresh(self, job):
         states = {row[0] for row in self.db.execute("SELECT status FROM deliveries WHERE job=?", (job,))}
-        priority = ["uncertain", "dispatching", "accepted", "failed", "expired", "published_unconfirmed", "media_fetched_unconfirmed"]
+        priority = ["uncertain", "dispatching", "accepted", "ready", "claimed", "failed", "expired", "interrupted", "dismissed", "published_unconfirmed", "media_fetched_unconfirmed", "completed_unconfirmed"]
         status = next(value for value in priority if value in states)
         if status in {"dispatching", "accepted"}:
             status = "synthesizing"
-        self.db.execute("UPDATE jobs SET status=?,text='' WHERE id=?", (status, job))
+        self.db.execute("UPDATE jobs SET status=?,text=CASE WHEN ? THEN text ELSE '' END WHERE id=?", (status, bool(states & {"ready", "accepted"}), job))
 
     def media_data(self, job, name, source, head):
         output = self.config["outputs"].get(name)
-        if not output or output["source_ip"] != source:
+        if not output or output.get("transport") == "home_today" or output["source_ip"] != source:
             return None
         with self.lock, self.db:
             row = self.db.execute("SELECT d.status,d.requests,j.expires,j.topic FROM deliveries d JOIN jobs j ON d.job=j.id WHERE d.job=? AND d.output=?", (job, name)).fetchone()
@@ -236,7 +315,7 @@ class Service:
                 self.cleanup()
                 # Conservatively hold the lane through the last possible download
                 # plus the maximum clip length, including across a restart.
-                cooling = self.db.execute("SELECT 1 FROM jobs j JOIN deliveries d ON j.id=d.job WHERE j.expires+12>? AND d.status IN ('dispatching','uncertain','published_unconfirmed','media_fetched_unconfirmed') LIMIT 1", (time.time(),)).fetchone()
+                cooling = self.db.execute("SELECT 1 FROM jobs j JOIN deliveries d ON j.id=d.job WHERE j.expires+15>? AND d.status IN ('ready','claimed','dispatching','uncertain','published_unconfirmed','media_fetched_unconfirmed') LIMIT 1", (time.time(),)).fetchone()
                 row = self.db.execute("SELECT * FROM jobs WHERE status='accepted' ORDER BY created LIMIT 1").fetchone()
                 if cooling or not row:
                     continue
@@ -247,7 +326,8 @@ class Service:
                     self.db.execute("UPDATE deliveries SET status='failed' WHERE job=?", (row["id"],))
                     self.refresh(row["id"])
                     continue
-            if not portal.idle(self.config, outputs):
+            legacy = [name for name in outputs if self.config["outputs"][name].get("transport") != "home_today"]
+            if legacy and not portal.idle(self.config, legacy):
                 continue
             with self.lock, self.db:
                 if row["expires"] <= time.time() or self.stopping.is_set():
@@ -265,6 +345,8 @@ class Service:
             with wave.open(str(path)) as wav:
                 if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or not 8000 <= wav.getframerate() <= 48000 or not 0 < wav.getnframes() <= 10 * wav.getframerate():
                     raise ValueError("invalid clip")
+                if wav.getframerate() != 22050 and any(self.config["outputs"][name].get("transport") == "home_today" for name in outputs):
+                    raise ValueError("unsupported native sample rate")
                 samples = array.array("h", wav.readframes(wav.getnframes()))
                 if sys.byteorder != "little":
                     samples.byteswap()
@@ -274,6 +356,8 @@ class Service:
                 state = "failed"
                 if row["expires"] <= time.time():
                     state = "expired"
+                elif self.config["outputs"][name].get("transport") == "home_today":
+                    state = "ready" if not self.stopping.is_set() else "failed"
                 elif not self.stopping.is_set() and portal.idle(self.config, [name]):
                     with self.lock, self.db:
                         # Commit dispatch intent before any MQTT bytes can leave.
@@ -292,7 +376,7 @@ class Service:
                 self.refresh(job)
 
     def start(self):
-        if "mqtt" in self.config:
+        if "model" in self.config:
             self.worker = threading.Thread(target=self.work)
             self.threads.append(self.worker)
             self.worker.start()

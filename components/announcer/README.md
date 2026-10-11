@@ -46,7 +46,7 @@ The ledger commits dispatch intent before MQTT publication. A fresh MQTT5 client
 publishes once, without retention or automatic reconnect/replay, with bounded
 message expiry. PUBACK failure/no-subscriber codes are not successes. Ambiguous
 disconnects/crashes become `uncertain` and are never retried automatically.
-The lane remains reserved until request expiry plus12 seconds, even after
+The lane remains reserved until request expiry plus15 seconds, even after
 restart, to reduce overlapping preparation/playback. This intentionally drops
 bursts that expire while waiting; it cannot bound Android's internal buffering.
 
@@ -111,3 +111,44 @@ podman build -f Containerfile -t household-announcer:test .
 
 Without `ANNOUNCER_TEST_MODEL`, speech/broker integration is explicitly skipped.
 See LICENSES.md and voices.lock.json before redistributing or changing voices.
+
+## Native Home Today delivery (unpublished candidate)
+
+An output may instead use `"transport":"home_today"`, with only `topics` and a
+unique `token_sha256`. Do not configure MQTT/source-IP/volume/Snapcast fields for
+that output. Omitted transport still means Immortal. Existing caller admission,
+topic subscriptions, queue/TTL/idempotency and Piper limits remain unchanged.
+Native outputs do not depend on Snapcast idle state: the foreground app owns its
+transient audio-focus request. An output has exactly one transport; never add a
+second output for the same physical Portal to enable both deliveries.
+
+The private API adds output-scoped Bearer endpoints:
+
+- `POST /v1/outputs/{output}/next`, empty body. Returns `{"announcement":null}`
+  or `{"announcement":{"id":"…","text":"…","remaining_ms":1234,"wav_base64":"…"}}`.
+  The raw speech is canonical PCM16 mono 22050Hz, up to10s/441044 bytes. The native
+  app validates it, prepends its approved chime/gap and normalizes speech to−3dBFS.
+- `POST /v1/outputs/{output}/{id}/result`, JSON with exactly `status`:
+  `completed_unconfirmed`, `dismissed`, `interrupted`, `failed` or `expired`.
+  Identical terminal acknowledgements are idempotent; conflicting ones return409.
+
+Caller tokens cannot consume or acknowledge outputs; output tokens cannot publish.
+Credentials must be distinct across callers and outputs. Text remains only until
+all ready native deliveries have been claimed or expired, at most the original TTL.
+No native audio is exposed through the unauthenticated LAN media listener.
+
+`ready` means speech is available, not that the app is online. Claiming commits
+`claimed` before any response bytes leave. Lost responses are deliberately dropped,
+not replayed: this is at-most-once dispatch, not guaranteed delivery. The app must
+subtract elapsed request time, persist deduplication before playback, reject expired
+or obsolete-lifecycle responses and never replay after interruption. A terminal
+result releases the single lane; without one, it stays reserved until expiry+15s,
+then becomes `uncertain`. A late result can resolve uncertainty. No status proves
+audible playback, including a MediaPlayer completion acknowledgement.
+
+No SQLite table migration is required, but these are additional ledger states.
+Before switching transports or rolling back binaries, stop admission and drain for
+45s (maximum30s TTL +15s playback guard); retain the PVC and idempotency history.
+The Home Today relay must remain disabled until reviewed images, a dedicated
+output token and a foreground Portal canary are approved. Background/sleep/wake
+delivery, UniFi webhook activation and automatic fallback to Immortal are excluded.
