@@ -5,6 +5,7 @@ import os
 import time
 import unittest
 import wave
+from pathlib import Path
 
 import test_service
 
@@ -73,6 +74,52 @@ class NativeDeliveryTest(unittest.TestCase):
         self.assertNotIn("text", status)
         second = self.accept(key="event-2")
         self.assertEqual(self.claim()["id"], second["id"], "terminal result must release the delivery lane")
+
+    def test_repeated_speech_reuses_audio_not_delivery_and_cache_is_caller_scoped_and_ephemeral(self):
+        self.service.close()
+        model = Path(self.directory.name) / "voice.onnx"
+        model.symlink_to(Path(self.config["model"]).resolve())
+        Path(str(model) + ".json").symlink_to(Path(self.config["model"] + ".json").resolve())
+        self.config["model"] = str(model)
+        self.start()
+
+        first = self.accept()
+        first_clip = self.claim()
+        result_path = f"/v1/outputs/portal/{first['id']}/result"
+        self.assertEqual(self.request("POST", result_path, {"status": "completed_unconfirmed"}, token="output-token")[0], 200)
+        model.unlink()  # Fresh inference is now unavailable; validated cached speech must still work.
+        (Path(self.directory.name) / f"{first['id']}.wav").unlink()
+
+        second = self.accept(key="event-2")
+        second_clip = self.claim()
+        self.assertNotEqual(second_clip["id"], first_clip["id"])
+        self.assertEqual(second_clip["id"], second["id"])
+        self.assertEqual(second_clip["wav_base64"], first_clip["wav_base64"])
+        self.assertIsNone(self.next()[1]["announcement"], "cached audio must not replay a delivery")
+        result_path = f"/v1/outputs/portal/{second['id']}/result"
+        self.assertEqual(self.request("POST", result_path, {"status": "completed_unconfirmed"}, token="output-token")[0], 200)
+
+        expired = self.accept(ttl=1, key="expired")
+        time.sleep(max(0, expired["expires_at"] - time.time()) + 0.1)
+        self.assertIsNone(self.next()[1]["announcement"], "cached speech must not extend event expiry")
+        self.assertEqual(self.request("GET", "/v1/announcements/" + expired["id"])[1]["status"], "expired")
+
+        def assert_inference_unavailable(text, token, key):
+            status, job = self.request("POST", body={"topic": "door.open", "text": text, "ttl_seconds": 30}, token=token, key=key)
+            self.assertEqual(status, 202)
+            for _ in range(200):
+                result = self.request("GET", "/v1/announcements/" + job["id"], token=token)[1]
+                if result["status"] == "failed":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(result["status"], "failed")
+            self.assertIsNone(self.next()[1]["announcement"])
+
+        assert_inference_unavailable("The side door opened.", "other-token", "other-caller")
+        assert_inference_unavailable("The side door closed.", "door-token", "different-text")
+        self.service.close()
+        self.start()
+        assert_inference_unavailable("The side door opened.", "door-token", "after-restart")
 
     def test_broadcast_preserves_text_for_each_authorized_output(self):
         self.service.close()

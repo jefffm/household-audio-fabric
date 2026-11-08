@@ -14,10 +14,14 @@ import threading
 import time
 import uuid
 import wave
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from . import media, portal
+
+
+MAX_WAV_BYTES = 960044  # 10 seconds of 48kHz PCM16 mono plus the WAV header.
 
 
 class HttpError(Exception):
@@ -61,6 +65,9 @@ class Service:
         fcntl.flock(self.process_lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         self.stopping = threading.Event()
         self.closed = False
+        # One worker owns this process-local cache; the configured voice is fixed
+        # for the service lifetime. Never share phrase knowledge across callers.
+        self.speech_cache = OrderedDict()
         self.db = sqlite3.connect(self.directory / "announcements.sqlite", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
         self.db.executescript("""
@@ -298,7 +305,7 @@ class Service:
             if row["status"] not in {"dispatching", "uncertain", "published_unconfirmed", "media_fetched_unconfirmed"} or row["requests"] >= 16:
                 return None
             path = self.directory / f"{job}.wav"
-            if not path.is_file() or path.stat().st_size > 960044:
+            if not path.is_file() or path.stat().st_size > MAX_WAV_BYTES:
                 return None
             if not head:
                 self.db.execute("UPDATE deliveries SET requests=requests+1 WHERE job=? AND output=?", (job, name))
@@ -338,10 +345,17 @@ class Service:
     def deliver(self, row, outputs):
         job = row["id"]
         path = self.directory / f"{job}.wav"
+        cache_key = (row["caller"], hashlib.sha256(row["text"].encode()).digest())
         try:
-            subprocess.run([sys.executable, "-m", "announcer.synthesize", "--model", self.config["model"], "--output", str(path), "--max-seconds", "10"],
-                           input=row["text"].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                           timeout=max(0.01, min(15, row["expires"] - time.time())), check=True)
+            cached = self.speech_cache.pop(cache_key, None)
+            if cached is None:
+                subprocess.run([sys.executable, "-m", "announcer.synthesize", "--model", self.config["model"], "--output", str(path), "--max-seconds", "10"],
+                               input=row["text"].encode(), stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=max(0.01, min(15, row["expires"] - time.time())), check=True)
+            else:
+                path.write_bytes(cached)
+            if path.stat().st_size > MAX_WAV_BYTES:
+                raise ValueError("clip too large")
             with wave.open(str(path)) as wav:
                 if wav.getnchannels() != 1 or wav.getsampwidth() != 2 or not 8000 <= wav.getframerate() <= 48000 or not 0 < wav.getnframes() <= 10 * wav.getframerate():
                     raise ValueError("invalid clip")
@@ -352,6 +366,9 @@ class Service:
                     samples.byteswap()
                 if max(abs(sample) for sample in samples) > 3932:
                     raise ValueError("unsafe peak")
+            self.speech_cache[cache_key] = cached if cached is not None else path.read_bytes()
+            if len(self.speech_cache) > 16:
+                self.speech_cache.popitem(last=False)
             for name in outputs:
                 state = "failed"
                 if row["expires"] <= time.time():
@@ -395,5 +412,6 @@ class Service:
             server.server_close()
         for thread in self.threads:
             thread.join()
+        self.speech_cache.clear()
         self.db.close()
         self.process_lock.close()

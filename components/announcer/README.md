@@ -35,6 +35,20 @@ Every accepted request snapshots its configured subscribers and is reauthorized
 before work starts. Caller input cannot choose devices, URLs, MQTT topics,
 commands, gain or priority. Changing configuration requires a service restart.
 
+Validated speech WAVs are memoized in a process-local, 16-entry least-recently-used
+cache, keyed by caller and a hash of the exact text. The voice is fixed for that
+process lifetime. A repeated phrase avoids Piper/model startup after its first
+successful synthesis; changed names/text and other callers do not reuse it. Each
+event still has its own job, deadline, authorization and consume-once delivery.
+Cached clips pass the same format/duration/peak checks and do not bypass the
+single delivery lane, extend expiry or replay a previous announcement.
+
+The cache retains audio content in RAM until eviction or shutdown, at most about
+15MiB of WAV data (16 clips of at most 960044 bytes). It stores no plaintext text
+keys, adds no persistent cache files, and is cleared on shutdown/restart. The
+first occurrence after a restart synthesizes normally. This optimization removes
+inference time, not the native receiver's polling delay or approved chime/gap.
+
 Statuses: `accepted`, `synthesizing`, `published_unconfirmed`,
 `media_fetched_unconfirmed`, `expired`, `failed`, `uncertain`. Per-output results
 are authoritative for mixed broadcasts; the aggregate prioritizes uncertainty
