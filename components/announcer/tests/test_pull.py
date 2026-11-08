@@ -155,6 +155,63 @@ class NativeDeliveryTest(unittest.TestCase):
         second = self.accept(key="event-2")
         self.assertEqual(self.claim()["id"], second["id"], "terminal result must release the delivery lane")
 
+    def test_native_delivery_does_not_wait_for_previous_playback_result(self):
+        first = self.accept()
+        self.assertEqual(self.claim()["id"], first["id"])
+        # This phrase is warm, so playback of the first clip is the only possible hold.
+        second = self.accept(key="interrupting-event")
+        clip, _ = self.wait_next(1)
+        self.assertIsNotNone(clip, "new native audio must be ready while the old clip is claimed")
+        self.assertEqual(clip["id"], second["id"])
+        for job, status in [(first, "interrupted"), (second, "completed_unconfirmed")]:
+            path = f"/v1/outputs/portal/{job['id']}/result"
+            self.assertEqual(self.request("POST", path, {"status": status}, token="output-token")[0], 200)
+        self.assertEqual(self.request("GET", "/v1/announcements/" + first["id"])[1]["status"], "interrupted")
+        self.assertIsNone(self.next()[1]["announcement"], "interruption must not replay either clip")
+
+    def test_blocked_mixed_output_does_not_hold_later_native_delivery(self):
+        self.service.close()
+        self.config["callers"]["door"]["topics"].append("other.topic")
+        self.config["outputs"]["legacy"] = {"topics": ["other.topic"], "source_ip": "127.0.0.1"}
+        self.start()
+        first = self.accept()
+        self.assertEqual(self.claim()["id"], first["id"])
+        status, blocked = self.request("POST", body={"topic": "other.topic", "text": "Legacy message.", "ttl_seconds": 30}, key="mixed")
+        self.assertEqual(status, 202)
+        newest = self.accept(key="new-native")
+        clip, _ = self.wait_next(1)
+        self.assertIsNotNone(clip, "blocked legacy output must not starve later native work")
+        self.assertEqual(clip["id"], newest["id"])
+        result = self.request("GET", "/v1/announcements/" + blocked["id"])[1]
+        self.assertEqual(result["outputs"], {"other": "accepted", "legacy": "accepted"})
+
+    def test_new_ready_native_audio_replaces_unclaimed_audio_per_output(self):
+        self.service.close()
+        self.config["outputs"]["other"]["topics"] = ["door.open"]
+        self.start()
+        first = self.accept()
+        second = None
+        for key in (None, "newest"):
+            job = first if key is None else self.accept(key=key)
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                result = self.request("GET", "/v1/announcements/" + job["id"])[1]
+                if result["status"] == "ready":
+                    break
+                time.sleep(0.05)
+            self.assertEqual(result["status"], "ready")
+            if key is None:
+                self.assertEqual(self.next(output="other", token="other-output-token")[1]["announcement"]["id"], first["id"])
+            else:
+                second = job
+        self.assertEqual(self.next()[1]["announcement"]["id"], second["id"])
+        result = self.request("GET", "/v1/announcements/" + first["id"])[1]
+        self.assertEqual(result["outputs"], {"portal": "interrupted", "other": "claimed"})
+        # Superseding one output must not invalidate a different output's old report.
+        path = f"/v1/outputs/other/{first['id']}/result"
+        self.assertEqual(self.request("POST", path, {"status": "completed_unconfirmed"}, token="other-output-token")[0], 200)
+        self.assertIsNone(self.next()[1]["announcement"])
+
     def test_repeated_speech_reuses_audio_not_delivery_and_cache_is_caller_scoped_and_ephemeral(self):
         self.service.close()
         model = Path(self.directory.name) / "voice.onnx"

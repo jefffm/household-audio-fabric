@@ -26,7 +26,7 @@ expiry, but SQLite/WAL and backups are not a secure-erasure mechanism.
 
 Limits: 2048-byte body, 240 characters, 1–30-second lifetime, eight waiting jobs,
 eight newly accepted requests per caller per minute, 10000 retained jobs, one
-global dispatch lane, 15-second synthesis deadline and10-second maximum speech.
+legacy dispatch lane, 15-second synthesis deadline and10-second maximum speech.
 Excess speech is rejected, not truncated. A native inference timeout kills its
 child process. Busy/offline or unreadable Snapcast status fails closed until
 request expiry. One unavailable subscriber holds the broadcast until expiry.
@@ -41,7 +41,7 @@ process lifetime. A repeated phrase avoids Piper/model startup after its first
 successful synthesis; changed names/text and other callers do not reuse it. Each
 event still has its own job, deadline, authorization and consume-once delivery.
 Cached clips pass the same format/duration/peak checks and do not bypass the
-single delivery lane, extend expiry or replay a previous announcement.
+legacy delivery lane, extend expiry or replay a previous announcement.
 
 The cache retains audio content in RAM until eviction or shutdown, at most about
 15MiB of WAV data (16 clips of at most 960044 bytes). It stores no plaintext text
@@ -60,7 +60,7 @@ The ledger commits dispatch intent before MQTT publication. A fresh MQTT5 client
 publishes once, without retention or automatic reconnect/replay, with bounded
 message expiry. PUBACK failure/no-subscriber codes are not successes. Ambiguous
 disconnects/crashes become `uncertain` and are never retried automatically.
-The lane remains reserved until request expiry plus15 seconds, even after
+The legacy lane remains reserved until request expiry plus15 seconds, even after
 restart, to reduce overlapping preparation/playback. This intentionally drops
 bursts that expire while waiting; it cannot bound Android's internal buffering.
 
@@ -175,10 +175,18 @@ No native audio is exposed through the unauthenticated LAN media listener.
 `claimed` before any response bytes leave. Lost responses are deliberately dropped,
 not replayed: this is at-most-once dispatch, not guaranteed delivery. The app must
 subtract elapsed request time, persist deduplication before playback, reject expired
-or obsolete-lifecycle responses and never replay after interruption. A terminal
-result releases the single lane; without one, it stays reserved until expiry+15s,
-then becomes `uncertain`. A late result can resolve uncertainty. No status proves
-audible playback, including a MediaPlayer completion acknowledgement.
+or obsolete-lifecycle responses and never replay after interruption. Native-only
+jobs prepare without waiting for earlier playback/results. When validated native
+audio becomes ready, it replaces older unclaimed ready audio for that output;
+the replaced delivery becomes `interrupted`. Failed/expired synthesis does not
+replace good audio. Already claimed clips retain their own terminal reports.
+An interruptible receiver keeps listening during playback and replaces it with
+the newest valid received clip, reporting the old one `interrupted`. Older APKs
+still finish their current playback before asking for the latest ready clip.
+Mixed/legacy dispatch retains its conservative global lane. Without a native
+terminal result, a claimed clip becomes `uncertain` at expiry+15s, but does not
+hold up newer native-only work. A late result can resolve uncertainty. No status
+proves audible playback, including a MediaPlayer completion acknowledgement.
 
 No SQLite table migration is required, but these are additional ledger states.
 Before switching transports or rolling back binaries, stop admission and drain for

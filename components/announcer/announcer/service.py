@@ -358,27 +358,29 @@ class Service:
         while not self.stopping.wait(0.1):
             with self.lock, self.db:
                 self.cleanup()
-                # Conservatively hold the lane through the last possible download
-                # plus the maximum clip length, including across a restart.
-                cooling = self.db.execute("SELECT 1 FROM jobs j JOIN deliveries d ON j.id=d.job WHERE j.expires+15>? AND d.status IN ('ready','claimed','dispatching','uncertain','published_unconfirmed','media_fetched_unconfirmed') LIMIT 1", (time.time(),)).fetchone()
-                row = self.db.execute("SELECT * FROM jobs WHERE status='accepted' ORDER BY created LIMIT 1").fetchone()
-                if cooling or not row:
+                rows = self.db.execute("SELECT * FROM jobs WHERE status='accepted' ORDER BY created").fetchall()
+            for row in rows:
+                with self.lock, self.db:
+                    outputs = [d[0] for d in self.db.execute("SELECT output FROM deliveries WHERE job=?", (row["id"],))]
+                    # Native receivers can interrupt playback. Only legacy dispatch
+                    # retains the conservative download/playback lane across restarts.
+                    legacy = [name for name in outputs if self.config["outputs"].get(name, {}).get("transport") != "home_today"]
+                    if legacy and self.db.execute("SELECT 1 FROM jobs j JOIN deliveries d ON j.id=d.job WHERE j.expires+15>? AND d.status IN ('ready','claimed','dispatching','uncertain','published_unconfirmed','media_fetched_unconfirmed') LIMIT 1", (time.time(),)).fetchone():
+                        continue
+                    authorized = row["topic"] in self.config["callers"].get(row["caller"], {}).get("topics", [])
+                    authorized = authorized and all(row["topic"] in self.config["outputs"].get(name, {}).get("topics", []) for name in outputs)
+                    if not authorized:
+                        self.db.execute("UPDATE deliveries SET status='failed' WHERE job=?", (row["id"],))
+                        self.refresh(row["id"])
+                        continue
+                if legacy and not portal.idle(self.config, legacy):
                     continue
-                outputs = [d[0] for d in self.db.execute("SELECT output FROM deliveries WHERE job=?", (row["id"],))]
-                authorized = row["topic"] in self.config["callers"].get(row["caller"], {}).get("topics", [])
-                authorized = authorized and all(row["topic"] in self.config["outputs"].get(name, {}).get("topics", []) for name in outputs)
-                if not authorized:
-                    self.db.execute("UPDATE deliveries SET status='failed' WHERE job=?", (row["id"],))
-                    self.refresh(row["id"])
-                    continue
-            legacy = [name for name in outputs if self.config["outputs"][name].get("transport") != "home_today"]
-            if legacy and not portal.idle(self.config, legacy):
-                continue
-            with self.lock, self.db:
-                if row["expires"] <= time.time() or self.stopping.is_set():
-                    continue
-                self.db.execute("UPDATE jobs SET status='synthesizing' WHERE id=?", (row["id"],))
-            self.deliver(row, outputs)
+                with self.lock, self.db:
+                    if row["expires"] <= time.time() or self.stopping.is_set():
+                        continue
+                    self.db.execute("UPDATE jobs SET status='synthesizing' WHERE id=?", (row["id"],))
+                self.deliver(row, outputs)
+                break
 
     def deliver(self, row, outputs):
         job = row["id"]
@@ -420,6 +422,15 @@ class Service:
                     url = f"{self.config['media_base_url']}/media/{job}/{name}.wav"
                     state = portal.publish(self.config, self.config["outputs"][name], url, row["expires"])
                 with self.lock, self.db:
+                    if state == "ready" and row["expires"] <= time.time():
+                        state = "expired"
+                    if state == "ready":
+                        # Only validated, ready native audio can replace an older
+                        # unclaimed clip. Claimed clips retain their own result.
+                        superseded = self.db.execute("SELECT d.job FROM deliveries d JOIN jobs j ON j.id=d.job WHERE d.output=? AND d.status='ready' AND j.created<?", (name, row["created"])).fetchall()
+                        for previous in superseded:
+                            self.db.execute("UPDATE deliveries SET status='interrupted' WHERE job=? AND output=?", (previous[0], name))
+                            self.refresh(previous[0])
                     self.db.execute("UPDATE deliveries SET status=? WHERE job=? AND output=? AND status!='media_fetched_unconfirmed'", (state, job, name))
         except (OSError, ValueError, wave.Error, subprocess.SubprocessError):
             with self.lock, self.db:
