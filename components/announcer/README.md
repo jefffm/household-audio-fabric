@@ -146,6 +146,26 @@ The private API adds output-scoped Bearer endpoints:
   `completed_unconfirmed`, `dismissed`, `interrupted`, `failed` or `expired`.
   Identical terminal acknowledgements are idempotent; conflicting ones return409.
 
+`next` is immediate by default for existing clients. `Prefer: wait=20` opts into
+long polling: the request waits for readiness or up to20 seconds, then returns
+the same envelope. Integer waits from1 through20 seconds are accepted. Readiness
+signals wake waiting requests immediately; no repeated HTTP polling is needed.
+At most one `next` request may wait per output (409 for a competitor), with at
+most four across the service so admission, results and health retain HTTP slots.
+Disconnected requests release their wait within250ms and do not claim later
+events; a disconnect racing an actual claim still drops that event without replay.
+Shutdown wakes all waiters. Waiting never holds a database transaction or the
+service lock, changes a job deadline, or bypasses authorization/consume-once claims.
+
+The response header `X-Announcement-Wait-Ms` is an integer from0 to the requested
+wait in milliseconds, rounded down. It measures time before the final claim;
+`remaining_ms` is sampled afterward. Relays/clients must subtract elapsed request
+time **minus this validated wait**, not the entire long request. Treat a missing
+header as0 (older server); reject malformed values, waits greater than requested,
+or waits exceeding actual elapsed time. Keep the existing bounded response and
+transport budgets beyond the wait. Renew successful idle long polls immediately;
+retain backoff for errors or immediate legacy/disabled responses.
+
 Caller tokens cannot consume or acknowledge outputs; output tokens cannot publish.
 Credentials must be distinct across callers and outputs. Text remains only until
 all ready native deliveries have been claimed or expired, at most the original TTL.

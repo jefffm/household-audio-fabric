@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import json
 import re
+import select
 import sqlite3
 import subprocess
 import sys
@@ -59,6 +60,8 @@ class Service:
     def __init__(self, config):
         self.config = config
         self.lock = threading.RLock()
+        self.ready = threading.Condition(self.lock)
+        self.waiters = set()
         self.directory = Path(config["data_dir"])
         self.directory.mkdir(parents=True, exist_ok=True)
         self.process_lock = (self.directory / "lock").open("a")
@@ -97,12 +100,14 @@ class Service:
             def log_message(self, *args):
                 pass
 
-            def respond(self, status, body):
+            def respond(self, status, body, wait_ms=None):
                 encoded = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(encoded)))
                 self.send_header("Cache-Control", "no-store")
+                if wait_ms is not None:
+                    self.send_header("X-Announcement-Wait-Ms", str(wait_ms))
                 self.end_headers()
                 self.wfile.write(encoded)
 
@@ -130,7 +135,13 @@ class Service:
                         if action == "next":
                             if int(length) != 0:
                                 raise HttpError(400, "empty_body_required")
-                            self.respond(200, {"announcement": service.claim(name)})
+                            prefer = self.headers.get("Prefer", "")
+                            if prefer and not re.fullmatch(r"wait=([1-9]|1[0-9]|20)", prefer):
+                                raise HttpError(400, "invalid_wait")
+                            wait = int(prefer.split("=")[1]) if prefer else 0
+                            clip, wait_ms = service.wait_for_claim(
+                                name, wait, lambda: bool(select.select([self.connection], [], [], 0)[0]))
+                            self.respond(200, {"announcement": clip}, wait_ms)
                         else:
                             if self.headers.get_content_type() != "application/json" or not int(length):
                                 raise HttpError(415, "json_required")
@@ -177,6 +188,33 @@ class Service:
         if (not authorization.startswith("Bearer ") or output.get("transport") != "home_today"
                 or not hmac.compare_digest(digest, output.get("token_sha256", ""))):
             raise HttpError(401, "unauthorized")
+
+    def wait_for_claim(self, name, wait, disconnected):
+        started = time.monotonic()
+        deadline = started + wait
+        with self.ready:
+            # Leave half of the eight HTTP slots for admission, results and health.
+            if name in self.waiters or (wait and len(self.waiters) >= 4):
+                raise HttpError(409, "output_busy")
+            if not wait:
+                return self.claim(name), 0
+            self.waiters.add(name)
+            try:
+                while not self.stopping.is_set():
+                    if disconnected():
+                        return None, 0
+                    # The lifetime is measured by claim *after* this wait, not at
+                    # the beginning of the HTTP request. Round down conservatively.
+                    wait_ms = min(wait * 1000, int((time.monotonic() - started) * 1000))
+                    clip = self.claim(name)
+                    if clip is not None or time.monotonic() >= deadline:
+                        return clip, wait_ms
+                    # Readiness is signalled immediately; this timeout only checks
+                    # abandoned connections so they cannot consume future events.
+                    self.ready.wait(min(0.25, max(0, deadline - time.monotonic())))
+                return None, 0
+            finally:
+                self.waiters.remove(name)
 
     def claim(self, name):
         with self.lock, self.db:
@@ -391,6 +429,8 @@ class Service:
         finally:
             with self.lock, self.db:
                 self.refresh(job)
+            with self.ready:
+                self.ready.notify_all()
 
     def start(self):
         if "model" in self.config:
@@ -407,6 +447,8 @@ class Service:
             return
         self.closed = True
         self.stopping.set()
+        with self.ready:
+            self.ready.notify_all()
         for server in (self.api, self.media):
             server.shutdown()
             server.server_close()
